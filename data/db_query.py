@@ -22,7 +22,7 @@ def get_engine(user, passwd, host, port, db_name):
     return _engine_cache[key]
 
 
-def fetch_kline(db_name,table_name, start_date=None, end_date=None, limit=10, sql_code=None):
+def fetch_kline(db_name, table_name, start_date=None, end_date=None, limit=10, sql_code=None):
     """
     主动从数据库查询指定证券代码的 K线数据
 

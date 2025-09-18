@@ -144,13 +144,14 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
 
 
 class LoggerEngine:
-    def __init__(self, event_engine, engine_id, LOG_DIR=None):
+    def __init__(self, event_engine, engine_id, LOG_DIR=None,to_console=True):
         self.event_engine = event_engine
         if LOG_DIR is None:
             BASE_DIR = self.get_base_dir()
             LOG_DIR = str((BASE_DIR / "logs" / f'{engine_id}.log').resolve())  # 日志最好放在/autotrade/logs里面，方便app读取
+            print(f'LOG_DIR: {LOG_DIR}')
 
-        self.logger = get_logger(name=engine_id, logfile=LOG_DIR)
+        self.logger = get_logger(name=engine_id, logfile=LOG_DIR,to_console=to_console)
         self.event_engine.register(EVENT_LOG, self._on_log)
 
     # 日志模块
