@@ -281,32 +281,29 @@ engine.get_account_daily_df().to_csv(f'macd_account.csv')
 ```
 from coreutils.constant import Interval
 from engine.trade_engine import CtaEngine
-from coreutils.logger import get_logger
+from coreutils.logger import LoggerEngine
 from engine.oms_engine import OmsBase
-from engine.event_engine import EventEngine
+from engine.event_engine import EventEngine, Event
 from conn.engine_mes_adapter import EngineMesAdapter
 from gateway.gateway_futu import FutuGateway as Gateway
-from pathlib import Path
 from strategy.example.macd import MACDStrategy
 
-
-def get_base_dir():
-    if "__file__" in globals():
-        # 普通脚本运行: __file__ 存在
-        return Path(__file__).resolve().parent.parent
-    else:
-        # 交互模式 (Jupyter/IPython): 用当前工作目录
-        return Path().resolve()
-
-
-BASE_DIR = get_base_dir()
 engine_id = 'mhi'
-# ==============1.日志系统=================
-LOG_DIR = BASE_DIR / "logs" / f'{engine_id}.log' # 日志最好放在/autotrade/logs里面，方便app读取
-logger = get_logger(name=engine_id, logfile=str(LOG_DIR.resolve()))
-# ==============2.事件引擎=================
+
+# ==============1.事件引擎=================
 event_engine = EventEngine()
 event_engine.start()
+# ==============2.日志系统=================
+# 改写增加微信推送
+class WechatLog(LoggerEngine):
+    def __init__(self, event_engine, engine_id, LOG_DIR=None):
+        super().__init__(event_engine, engine_id, LOG_DIR)
+
+    def process_error(self, msg: str):
+        self.logger.wechat(content=msg, level='error')
+
+
+logger_engine = WechatLog(event_engine, engine_id)
 # ==============3.oms引擎=================
 oms = OmsBase(event_engine)
 # ==============4.gateway=================
@@ -316,12 +313,13 @@ gateway = Gateway(event_engine)
 cta_adapter = EngineMesAdapter(engine_id, event_engine, oms)
 cta_adapter.start()
 # ==============6.cta 引擎=================
-cta_engine = CtaEngine(oms=oms, event_engine=event_engine, gateway=gateway, logger=logger)
+cta_engine = CtaEngine(oms=oms, event_engine=event_engine, gateway=gateway)
 gateway.connect(
     setting={'symbols': ['HK.MHImain'], 'intervals': [Interval.TICK, Interval.K_1M, Interval.K_5M, Interval.K_15M]})
 # ==============7.实例化引擎=================
 strategy = MACDStrategy(event_engine=event_engine, symbol="HK.MHImain", work_interval=Interval.K_1H)
 strategy.initialize()
+
 ```
 
 
@@ -332,11 +330,40 @@ strategy.initialize()
 
 ### 3.3 修改config
 
-在config中我定义了一些例如数据库等配置信息，如果实盘运行需要修改这一文件
+在config中我定义了一些例如数据库等配置信息，需要在根目录新建.env，也就是autotrade/.env，并且根据要求填写
+
+```
+# ===================== 数据库信息 =====================
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=xxxxxx
+
+# ===================== 常量设置 =====================
+SERVERJIANG_PROTOKEN=xxx
+SERVERJIANG_DBPATH=mysql+pymysql://root:@localhost:3306/qtdb_pro
+SERVERJIANG_RETRY_TIMES=2
+SERVERJIANG_RETRY_GAP=61
+SERVERJIANG_SERVERJIANG=xxxxx 
+
+# ===================== Linux 服务器配置 =====================
+LINUX_HOSTNAME=xxx
+LINUX_USERNAME=root
+LINUX_PASSWORD=xxx
+
+# ===================== Futu OpenD 配置 =====================
+FUTU_HOST=127.0.0.1
+FUTU_PORT=11111
+FUTU_PWD_UNLOCK=xxxx
+```
+
+
 
 ### 3.4 微信推送
 
-想要实现微信推送的功能，可以参考6.1模块进行配置，目前处理日志的模块放在了TRADE ENGINE，我建议将TRADE ENGINE 的日志处理单独拿出来修改，进行信息筛选后可以推送
+想要实现微信推送的功能，可以参考6.1模块进行配置
+
+
 
 ## 4.  APP 使用
 
@@ -1470,7 +1497,7 @@ TRADE ENGINE主要负责几个功能：统一GATEWAY，接收并转发各种订�
         self.ee.register(EVENT_ORDER_REQ, self._on_order_req)
         self.ee.register(EVENT_CANCEL_REQ, self._on_cancel_req)
         self.ee.register(EVENT_MODIFY_REQ, self._on_modify_req)
-        self.ee.register(EVENT_LOG, self._on_log)
+        
     # ---- 三个“请求事件”入口：统一防火墙+下发 ----
     def _on_order_req(self, e: Event):
         # 如果引擎暂停mute request
@@ -2303,6 +2330,8 @@ get_logger(
 
 返回的是标准 `logging.Logger`
 
+
+
 ### 6.1.2 微信推送
 
 在上面的实例上挂了一个微信推送的方法：
@@ -2329,17 +2358,93 @@ logger.wechat("策略启动成功")  # 仅标题也可
 
    ![image-20250914130626193](./assets/image-20250914130626193.png)
 
-2. 在/autotrade/coreutils/config.py修改serverjiang中proToken和serverjiang(网址)
+2. 在/autotrade下新建.env,并增加serverjiang中proToken和serverjiang(网址)
 
 ```
-serverjiang = SimpleNamespace(
-    proToken="修改",
-    dbPath="mysql+pymysql://root:@localhost:3306/qtdb_pro",
-    retry_times=2,
-    retry_gap=61,
-    serverjiang="https://sctapi.ftqq.com/修改"
-)
+SERVERJIANG_PROTOKEN=xxxxx  # server酱里面的sendkey
+SERVERJIANG_DBPATH=mysql+pymysql://root:@localhost:3306/qtdb_pro
+SERVERJIANG_RETRY_TIMES=2
+SERVERJIANG_RETRY_GAP=61
+SERVERJIANG_SERVERJIANG="https://sctapi.ftqq.com/修改"
 ```
+
+
+
+### 6.1.3 LoggerEngine
+
+基于事件引擎的log处理模块，自动订阅EVENT_LOG并记录。默认记录位置放在根目录下的logs里面，也就是/autotrade/logs/
+
+```
+class LoggerEngine:
+    def __init__(self, event_engine, engine_id, LOG_DIR=None):
+        self.event_engine = event_engine
+        if LOG_DIR is None:
+            BASE_DIR = self.get_base_dir()
+            LOG_DIR = str((BASE_DIR / "logs" / f'{engine_id}.log').resolve())  # 日志最好放在/autotrade/logs里面，方便app读取
+
+        self.logger = get_logger(name=engine_id, logfile=LOG_DIR)
+        self.event_engine.register(EVENT_LOG, self._on_log)
+
+    # 日志模块
+    def _on_log(self, event: Event):
+        log_data: LogData = event.data
+        log_level = log_data.level
+        msg = log_data.msg
+        if log_level == LogLevel.DEBUG:
+            self.process_debug(msg)
+        elif log_level == LogLevel.INFO:
+            self.process_info(msg)
+        elif log_level == LogLevel.WARNING:
+            self.process_warning(msg)
+        elif log_level == LogLevel.ERROR:
+            self.process_error(msg)
+
+    def process_debug(self, msg: str):
+        self.logger.debug(msg)
+
+    def process_info(self, msg: str):
+        self.logger.info(msg)
+
+    def process_warning(self, msg: str):
+        self.logger.warning(msg)
+
+    def process_error(self, msg: str):
+        self.logger.error(msg)
+
+    @staticmethod
+    def get_base_dir():
+        if "__file__" in globals():
+            # 普通脚本运行: __file__ 存在
+            return Path(__file__).resolve().parent.parent
+        else:
+            # 交互模式 (Jupyter/IPython): 用当前工作目录
+            return Path().resolve()
+```
+
+具体用法如下
+
+```
+event_engine = EventEngine()
+event_engine.start()
+logger = LoggerEngine(event_engine,engine_id="logger_test")
+event_engine.put(Event(EVENT_LOG,LogData(msg='this is a test')))
+```
+
+如果要改成微信推送，可以继承后改写
+
+```
+class WechatLog(LoggerEngine):
+    def __init__(self, event_engine, engine_id, LOG_DIR=None):
+        super().__init__(event_engine, engine_id, LOG_DIR)
+
+    def process_error(self, msg: str):
+        self.logger.wechat(content=msg, level='error')
+
+
+logger_engine = WechatLog(event_engine, engine_id)
+```
+
+
 
 ## 6.2 数据定义模块(Object.py\Constant.py)
 

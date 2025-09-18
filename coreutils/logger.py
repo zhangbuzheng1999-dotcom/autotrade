@@ -31,6 +31,10 @@ import os
 import requests
 from coreutils.config import serverjiang
 from logging.handlers import TimedRotatingFileHandler
+from engine.event_engine import EVENT_LOG, Event, EventEngine
+from coreutils.constant import LogLevel
+from coreutils.object import LogData
+from pathlib import Path
 
 
 def get_logger(name: str = 'main', logfile: str = 'run.log',
@@ -96,7 +100,7 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
         logger.addHandler(console_handler)
 
     # 添加扩展方法 logger.wechat(...)
-    def wechat_log(self, title, content=None, level="info", channel=1):
+    def wechat_log(self, title=None, content=None, level="info", channel=1):
         """
         推送一条日志到微信（Server酱）+ 写入日志文件
 
@@ -114,6 +118,8 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
         channel : int
             推送渠道编号（用于支持多通道服务，默认 1）
         """
+        if title is None:
+            title = " "
         msg = content if content else title
 
         # 写入日志
@@ -136,3 +142,48 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
 
     return logger
 
+
+class LoggerEngine:
+    def __init__(self, event_engine, engine_id, LOG_DIR=None):
+        self.event_engine = event_engine
+        if LOG_DIR is None:
+            BASE_DIR = self.get_base_dir()
+            LOG_DIR = str((BASE_DIR / "logs" / f'{engine_id}.log').resolve())  # 日志最好放在/autotrade/logs里面，方便app读取
+
+        self.logger = get_logger(name=engine_id, logfile=LOG_DIR)
+        self.event_engine.register(EVENT_LOG, self._on_log)
+
+    # 日志模块
+    def _on_log(self, event: Event):
+        log_data: LogData = event.data
+        log_level = log_data.level
+        msg = log_data.msg
+        if log_level == LogLevel.DEBUG:
+            self.process_debug(msg)
+        elif log_level == LogLevel.INFO:
+            self.process_info(msg)
+        elif log_level == LogLevel.WARNING:
+            self.process_warning(msg)
+        elif log_level == LogLevel.ERROR:
+            self.process_error(msg)
+
+    def process_debug(self, msg: str):
+        self.logger.debug(msg)
+
+    def process_info(self, msg: str):
+        self.logger.info(msg)
+
+    def process_warning(self, msg: str):
+        self.logger.warning(msg)
+
+    def process_error(self, msg: str):
+        self.logger.error(msg)
+
+    @staticmethod
+    def get_base_dir():
+        if "__file__" in globals():
+            # 普通脚本运行: __file__ 存在
+            return Path(__file__).resolve().parent.parent
+        else:
+            # 交互模式 (Jupyter/IPython): 用当前工作目录
+            return Path().resolve()

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Set, Dict, Optional, Tuple
 
-from coreutils.constant import LogLevel, Direction, OrderType, Exchange, OrderStatus
+from coreutils.constant import LogLevel, Direction, OrderType, Exchange, OrderStatus, LogLevel
 from coreutils.object import (
     OrderRequest, CancelRequest, ModifyRequest,
     OrderData, PositionData, LogData
@@ -17,6 +17,7 @@ from engine.event_engine import (
 CMD_ENGINE_MUTE = "engine.mute"  # data: {"symbols":[...], "on":True/False, "reason":""}
 CMD_ENGINE_SWITCH = "engine.switch"  # data: {"on":True/False}
 
+
 class CtaEngine:
     """
     职责极简：
@@ -25,11 +26,10 @@ class CtaEngine:
     - 仅处理两个命令：engine.mute / engine.switch
     """
 
-    def __init__(self, oms, event_engine: EventEngine, gateway, logger):
+    def __init__(self, oms, event_engine: EventEngine, gateway):
         self.oms = oms
         self.ee = event_engine
         self.gateway = gateway
-        self.logger = logger
 
         self.strategy = None
         self.active = True
@@ -42,7 +42,6 @@ class CtaEngine:
         self.ee.register(EVENT_ORDER_REQ, self._on_order_req)
         self.ee.register(EVENT_CANCEL_REQ, self._on_cancel_req)
         self.ee.register(EVENT_MODIFY_REQ, self._on_modify_req)
-        self.ee.register(EVENT_LOG, self._on_log)
 
     # ---- 白名单（模块内单：ROLL:/RISK:/ENGINE:） ----
     @staticmethod
@@ -57,7 +56,7 @@ class CtaEngine:
         req: OrderRequest = e.data
         # mute 防火墙（策略/外部模块均受控），内部单白名单放行
         if req.symbol in self._muted_symbols and not self._is_internal_ref(req.reference):
-            self.logger.warning(f"[FW] send blocked: {req.symbol} ref={req.reference}")
+            self.write_log(f"[FW] send blocked: {req.symbol} ref={req.reference}", level=LogLevel.INFO)
             return
         self.gateway.send_order(req)
 
@@ -76,21 +75,9 @@ class CtaEngine:
         req: ModifyRequest = e.data
         # ModifyRequest 通常没有 reference，mute 期间一律拦截（简单稳妥）
         if req.symbol in self._muted_symbols:
-            self.logger.warning(f"[FW] modify blocked: {req.symbol} {req.orderid}")
+            self.write_log(f"[FW] modify blocked: {req.symbol} {req.orderid}", level=LogLevel.INFO)
             return
         self.gateway.modify_order(req)
-
-    # 日志模块
-    def _on_log(self, event: Event):
-        log_data: LogData = event.data
-        if log_data.level == LogLevel.DEBUG:
-            self.logger.debug(log_data.msg)
-        elif log_data.level == LogLevel.INFO:
-            self.logger.info(log_data.msg)
-        elif log_data.level == LogLevel.WARNING:
-            self.logger.warning(log_data.msg)
-        elif log_data.level == LogLevel.ERROR:
-            self.logger.error(log_data.msg)
 
     # ---- 命令：mute 开关 & 引擎开关 ----
     def _on_cmd(self, e: Event):
@@ -104,17 +91,25 @@ class CtaEngine:
                 reason = payload.get("reason", "")
                 if on:
                     self._muted_symbols |= syms
-                    self.logger.info(f"[ENGINE] mute ON {syms} reason={reason}")
+                    self.write_log(f"[ENGINE] mute ON {syms} reason={reason}", level=LogLevel.INFO)
                 else:
                     self._muted_symbols -= syms
-                    self.logger.info(f"[ENGINE] mute OFF {syms} reason={reason}")
+                    self.write_log(f"[ENGINE] mute OFF {syms} reason={reason}", level=LogLevel.INFO)
+
             elif cmd == CMD_ENGINE_SWITCH:
                 self.active = bool(payload.get("on"))
-                self.logger.info(f"[ENGINE] active={self.active}")
+                self.write_log(f"[ENGINE] active={self.active}", level=LogLevel.INFO)
+
 
         except Exception as ex:
-            self.logger.error(f"[ENGINE CMD] err {cmd}: {ex}")
+            self.write_log(f"[ENGINE CMD] err {cmd}: {ex}",level=LogLevel.ERROR)
 
+    def write_log(self, msg: str, level: LogLevel) -> None:
+        """
+        Write a log event from gateway.
+        """
+        log: LogData = LogData(msg=msg, level=level)
+        self.ee.put(Event(EVENT_LOG, log))
 
 
 class Phase(Enum):
@@ -158,6 +153,7 @@ class RolloverManager:
     - 仅通过 EVENT_*_REQ 发撤单/发单请求，不直连 gateway；
     - 清场只撤非 ROLL；发腿只等 ACK（非 REJECT 即 OK，不等成交）。
     """
+
     def __init__(self, oms, event_engine: EventEngine, logger):
         self.oms = oms
         self.ee = event_engine
