@@ -4,3 +4,10 @@
 
 # 忽略环境文件
 .env
+
+# 忽略 strategy 下的所有内容
+/strategy/*
+
+# 保留 strategy/example 目录
+!/strategy/example/
+/strategy/example/*
