@@ -281,7 +281,7 @@ async def ws_endpoint(ws: WebSocket):
 if __name__ == "__main__":
     # 便于手动跑：预置一个用户
     user_manager.add_user("testuser", "testpassword")
-    host = "0.0.0.0"
+    host = "10.1.20.5"
     port = 8000
     print("[ws_hub] listening on %s:%d" % (host, port))
     uvicorn.run(app, host=host, port=port)

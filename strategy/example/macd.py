@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
+import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import numpy as np
-from talib import MACD
+import pandas_ta as ta
 from coreutils.constant import Interval, Exchange, Direction, OrderType
 from coreutils.object import BarData, TradeData, OrderRequest, PositionData, LogData
 from strategy.strategy_base import StrategyBase, TargetOrder
@@ -93,19 +93,22 @@ class MACDStrategy(StrategyBase):
             return  # 数据不足
 
         arr = np.asarray(self._closes, dtype=float)
-        macd, macd_signal, _ = MACD(
-            arr,
-            fastperiod=self.fast,
-            slowperiod=self.slow,
-            signalperiod=self.signal
-        )
+        # 计算 MACD
+        s = pd.Series(arr)
+        macd_df = ta.macd(s, fast=12, slow=26, signal=9)
 
-        # 需要至少两根有效值用于判断穿越
-        if np.isnan(macd[-1]) or np.isnan(macd_signal[-1]) or np.isnan(macd[-2]) or np.isnan(macd_signal[-2]):
+        if macd_df is not None:
+            macd = macd_df["MACD_12_26_9"]  # DIF
+            macd_signal = macd_df["MACDs_12_26_9"]  # DEA
+
+            if np.isnan(macd.iloc[-1]) or np.isnan(macd_signal.iloc[-1]) or \
+                    np.isnan(macd.iloc[-2]) or np.isnan(macd_signal.iloc[-2]):
+                return
+            else:
+                prev_diff = macd.iloc[-2] - macd_signal.iloc[-2]
+                curr_diff = macd.iloc[-1] - macd_signal.iloc[-1]
+        else:
             return
-
-        prev_diff = macd[-2] - macd_signal[-2]
-        curr_diff = macd[-1] - macd_signal[-1]
 
         golden = (prev_diff <= 0) and (curr_diff > 0)  # 金叉
         dead = (prev_diff >= 0) and (curr_diff < 0)  # 死叉
