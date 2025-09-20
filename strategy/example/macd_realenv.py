@@ -6,7 +6,6 @@ from engine.event_engine import EventEngine, Event
 from conn.engine_mes_adapter import EngineMesAdapter
 from gateway.gateway_futu import FutuGateway as Gateway
 from strategy.example.macd import MACDStrategy
-
 engine_id = 'mhi'
 
 # ==============1.事件引擎=================

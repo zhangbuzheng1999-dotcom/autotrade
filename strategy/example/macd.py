@@ -5,16 +5,13 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import numpy as np
-import pandas_ta as ta
 from coreutils.constant import Interval, Exchange, Direction, OrderType
 from coreutils.object import BarData, TradeData, OrderRequest, PositionData, LogData
 from strategy.strategy_base import StrategyBase, TargetOrder
 from backtest.backtest_engine import BacktestEngine
 from engine.event_engine import EventEngine, EVENT_TICK, EVENT_ORDER, EVENT_TRADE, EVENT_BAR, EVENT_LOG, \
     EVENT_ORDER_REQ, EVENT_CANCEL_REQ, EVENT_MODIFY_REQ
-
-# 依赖：你已有的 StrategyBase / TargetOrder / 常量 等
-# from your_module import StrategyBase, TargetOrder, ENTRY_REFS, EVENT_LOG, ...
+from coreutils.ta import macd
 
 class MACDStrategy(StrategyBase):
     """
@@ -94,19 +91,19 @@ class MACDStrategy(StrategyBase):
 
         arr = np.asarray(self._closes, dtype=float)
         # 计算 MACD
-        s = pd.Series(arr)
-        macd_df = ta.macd(s, fast=12, slow=26, signal=9)
+        s = pd.Series(arr, dtype=float)  # arr 是收盘价数组
+        macd_df = macd(s, fast=12, slow=26, signal=9)
 
         if macd_df is not None:
-            macd = macd_df["MACD_12_26_9"]  # DIF
-            macd_signal = macd_df["MACDs_12_26_9"]  # DEA
+            macd_line = macd_df["DIF"]
+            macd_signal = macd_df["DEA"]
 
-            if np.isnan(macd.iloc[-1]) or np.isnan(macd_signal.iloc[-1]) or \
-                    np.isnan(macd.iloc[-2]) or np.isnan(macd_signal.iloc[-2]):
+            if np.isnan(macd_line.iloc[-1]) or np.isnan(macd_signal.iloc[-1]) or \
+                    np.isnan(macd_line.iloc[-2]) or np.isnan(macd_signal.iloc[-2]):
                 return
             else:
-                prev_diff = macd.iloc[-2] - macd_signal.iloc[-2]
-                curr_diff = macd.iloc[-1] - macd_signal.iloc[-1]
+                prev_diff = macd_line.iloc[-2] - macd_signal.iloc[-2]
+                curr_diff = macd_line.iloc[-1] - macd_signal.iloc[-1]
         else:
             return
 

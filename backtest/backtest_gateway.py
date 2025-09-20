@@ -11,7 +11,6 @@ from coreutils.object import (ModifyRequest, CancelRequest,
 
 from coreutils.constant import Direction, OrderType, OrderStatus
 
-
 class BacktestGateway:
     """
     模拟交易所模块，负责：
@@ -144,6 +143,8 @@ class BacktestGateway:
             if self._stop_trigger(order, bar):
                 order.status = OrderStatus.PENDING
                 order.datetime = self.current_date
+                # 记录触发在哪根bar
+                order.triggered_bar = bar.datetime
 
                 self.active_orders[symbol][oid] = order
                 del self.inactive_orders[symbol][oid]
@@ -162,13 +163,21 @@ class BacktestGateway:
 
                 self._fill_order(order, close_price)
                 del self.active_orders[symbol][oid]
+
             elif order.type in [OrderType.ABS_LMT]:
                 if self._can_fill_absolute(order, bar):
                     self._fill_order(order, order.price)
                     del self.active_orders[symbol][oid]
+
             elif order.type in [OrderType.LIMIT, OrderType.STP_LMT]:
                 if self._can_fill(order, bar):
-                    self._fill_order(order, self._get_fill_price(order, bar))
+                    # 如果是 STP_LMT 并且刚刚在这根 bar 被触发
+                    if order.type == OrderType.STP_LMT and getattr(order, "triggered_bar", None) == bar.datetime:
+                        # 当根 bar 内只能盘中成交 → 给限价
+                        self._fill_order(order, order.price)
+                    else:
+                        # 普通限价逻辑（允许开盘成交）
+                        self._fill_order(order, self._get_fill_price(order, bar))
                     del self.active_orders[symbol][oid]
 
     def _stop_trigger(self, order: OrderData, bar: BarData) -> bool:
@@ -182,9 +191,17 @@ class BacktestGateway:
 
     def _get_fill_price(self, order: OrderData, bar: BarData) -> float:
         if order.direction == Direction.LONG:
-            return order.price if order.price <= bar.open_price else bar.open_price  # 开盘可成交→开盘价；否则盘中触达→限价
+            # 开盘小于等于限价 → 开盘成交
+            if bar.open_price <= order.price:
+                return bar.open_price
+            # 否则，盘中触发成交 → 限价
+            return order.price
         else:  # SHORT
-            return order.price if order.price >= bar.open_price else bar.open_price
+            # 开盘大于等于限价 → 开盘成交
+            if bar.open_price >= order.price:
+                return bar.open_price
+            # 否则，盘中触发成交 → 限价
+            return order.price
 
     def _can_fill_absolute(self, order: OrderData, bar: BarData) -> bool:
         return bar.low_price <= order.price <= bar.high_price
