@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 import warnings
-import talib as ta
 
 # ====== 输入标准化 ======
 def _to_series(data, name="value"):
@@ -85,28 +84,3 @@ def bbands(data, length=20, std=2):
     return res
 
 
-# ====== 测试对比 ======
-if __name__ == "__main__":
-    close = pd.Series(np.arange(1, 101), dtype=float)
-
-    # --- MACD 对比 ---
-    my_macd = macd(close)
-    ta_macd = pd.DataFrame({
-        "DIF": ta.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)[0],
-        "DEA": ta.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)[1],
-        "MACD": ta.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)[2]
-    })
-
-    print("=== MACD 对比 (最后5行) ===")
-    print(pd.concat([my_macd.tail(), ta_macd.tail()], axis=1))
-
-    # --- BBANDS 对比 ---
-    my_bbands = bbands(close)
-    ta_bbands = pd.DataFrame({
-        "BBU": ta.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)[0],
-        "BBM": ta.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)[1],
-        "BBL": ta.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)[2],
-    })
-
-    print("\n=== BBANDS 对比 (最后5行) ===")
-    print(pd.concat([my_bbands.tail(), ta_bbands.tail()], axis=1))

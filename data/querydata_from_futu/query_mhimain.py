@@ -17,13 +17,35 @@ warnings.filterwarnings('ignore')
 sys.path.append('//')
 # 获取数据库基本信息
 # cursor用于执行cursor.execute（）
+import pymysql
+from sqlalchemy import create_engine
+from coreutils.config import DatabaseInfo
 
-# conn_to_sql用于写入数据库
+# 先连接 MySQL（不指定数据库）
+conn = pymysql.connect(
+    host=DatabaseInfo.host,
+    user=DatabaseInfo.user,
+    password=DatabaseInfo.password,
+    port=int(DatabaseInfo.port),
+    charset='utf8mb4'
+)
+cursor = conn.cursor()
+
+# 创建数据库 HKEX（如果不存在）
+cursor.execute("CREATE DATABASE IF NOT EXISTS HKEX DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
+conn.commit()
+
+cursor.close()
+conn.close()
+
+# 再创建 SQLAlchemy 连接
 conn_to_sql = create_engine(
     "mysql+pymysql://{}:{}@{}:{}/{}".format(
         DatabaseInfo.user, DatabaseInfo.password, DatabaseInfo.host, DatabaseInfo.port, "HKEX"
     ),
-    pool_size=15, pool_recycle=1600, pool_pre_ping=True, pool_use_lifo=True, echo_pool=True, max_overflow=5)
+    pool_size=15, pool_recycle=1600, pool_pre_ping=True, pool_use_lifo=True, echo_pool=True, max_overflow=5
+)
+
 
 code = 'HK.MHImain'
 quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
