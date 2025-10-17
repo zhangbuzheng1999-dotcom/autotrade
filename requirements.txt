@@ -10,7 +10,7 @@ pytest==8.4.1
 python-dotenv==1.1.1
 bcrypt==4.3.0
 pyzmq==26.2.0
-Requests==2.32.5
+Requests==2.32.4
 SQLAlchemy==2.0.41
 uvicorn==0.35.0
 websockets==15.0.1

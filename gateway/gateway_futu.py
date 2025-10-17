@@ -3,18 +3,21 @@ import pandas as pd
 from futu import (TickerHandlerBase, SubType, OpenQuoteContext, OpenSecTradeContext,
                   OpenFutureTradeContext, SecurityFirm, RET_OK, RET_ERROR, TrdEnv, ModifyOrderOp, TradeOrderHandlerBase,
                   )
-from engine.event_engine import EventEngine, EVENT_TICK, EVENT_BAR, EVENT_TRADE, EVENT_ORDER,EVENT_POSITION
+from engine.event_engine import EventEngine, EVENT_TICK, EVENT_BAR, EVENT_TRADE, EVENT_ORDER, EVENT_POSITION
 from gateway.base_gateway import BaseGateway
 from coreutils.object import (TickData, BarData, TradeData, Exchange, ModifyRequest, HistoryRequest, CancelRequest,
                               OrderData,
                               OrderRequest, PositionData)
-from coreutils.constant import Interval, Direction, OrderType, OrderStatus,LogLevel
+from coreutils.constant import Interval, Direction, OrderType, OrderStatus, LogLevel
 from conn import klinepubsub
 from coreutils.config import FutuInfo
 from coreutils.exceptions import FutuException
 from functools import partial
 import uuid
 from data.db_query import fetch_kline
+
+ACTIVE_STATUSES = {OrderStatus.SUBMITTING, OrderStatus.NOTTRADED, OrderStatus.PARTTRADED, OrderStatus.PENDING,
+                   OrderStatus.UNKNOWN, OrderStatus.MODIFIED}
 
 
 class FutuTickHandler(TickerHandlerBase):
@@ -126,21 +129,21 @@ class FutuGateway(BaseGateway):
         sub_list = [(symbol, interval) for symbol in symbols for interval in intervals]
         for symbol, interval in sub_list:
             sub_kline.subscribe(interval, partial(self.on_kline, interval=interval))
-            self.write_log(f"FutuGateway 已启动，订阅 {symbol} 的 {interval} K线",level=LogLevel.INFO)
+            self.write_log(f"FutuGateway 已启动，订阅 {symbol} 的 {interval} K线", level=LogLevel.INFO)
 
     def subscribe_tick(self, symbols: list):
         ret, msg = self.quote_ctx.subscribe(symbols, [SubType.TICKER])
         if ret == RET_ERROR:
-            self.write_log(f"subscribe_tick ERROR,symbols:{symbols},{msg}",level=LogLevel.ERROR)
+            self.write_log(f"subscribe_tick ERROR,symbols:{symbols},{msg}", level=LogLevel.ERROR)
         else:
-            self.write_log(f"subscribe_tick 成功:{symbols},{msg}",level=LogLevel.INFO)
+            self.write_log(f"subscribe_tick 成功:{symbols},{msg}", level=LogLevel.INFO)
 
     def unsubscribe_tick(self, symbols: list):
         ret, msg = self.quote_ctx.unsubscribe(symbols, [SubType.TICKER])
         if ret == RET_ERROR:
-            self.write_log(f"unsubscribe_tick ERROR,symbols:{symbols},{msg}",level=LogLevel.ERROR)
+            self.write_log(f"unsubscribe_tick ERROR,symbols:{symbols},{msg}", level=LogLevel.ERROR)
         else:
-            self.write_log(f"unsubscribe_tick 成功:{symbols},{msg}",level=LogLevel.INFO)
+            self.write_log(f"unsubscribe_tick 成功:{symbols},{msg}", level=LogLevel.INFO)
 
     def on_tick(self, df):
         if df.empty:
@@ -215,33 +218,45 @@ class FutuGateway(BaseGateway):
         # 因此刚开始提交futu的订单状态并不由on_order_update返回,而是在self._send_order中返回
         if pre_order is None:
             return
-        order_status = self.convert_order_status(df["order_status"])
-        order_type = self.convert_order_type(futu_order_type=df['order_type'])
-        direction = self.convert_order_direction(futu_direction=df["trd_side"])
-        volume = df['qty']
-        traded = df['dealt_qty']
-        price = df['price']
-        avgfillprice = df['dealt_avg_price']
-        code = df['code']
-        reference = df['remark']
-        trade_time = pd.Timestamp.now()
+
         # 和下订单symbol、exchange保持一致
-        order_data = OrderData(symbol=pre_order.symbol, exchange=pre_order.exchange, orderid=pre_order.orderid,
-                               type=order_type,
-                               direction=direction, volume=volume, price=price, gateway_name='FUTU',
-                               status=order_status, traded=traded, avgFillPrice=avgfillprice,
-                               broker_orderid=broker_id, reference=reference, datetime=trade_time)
+        order_data = self.convert_to_orderdata(df, orderid=pre_order.orderid, exchange=pre_order.exchange)
+        order_data.symbol = pre_order.symbol
         self.on_order(order_data)
-        if order_status in [OrderStatus.ALLTRADED, OrderStatus.PARTTRADED]:
-            trade_data = TradeData(symbol=code, exchange=Exchange.HKFE, orderid=pre_order.orderid, tradeid=broker_id,
-                                   direction=direction, volume=volume, price=price, gateway_name='FUTU',
-                                   status=order_status, traded=traded, avgFillPrice=avgfillprice, reference=reference,
-                                   datetime=trade_time)
+        # 更新order_map
+        self._order_map[pre_order.orderid] = order_data
+
+        if order_data.status in [OrderStatus.ALLTRADED, OrderStatus.PARTTRADED]:
+            trade_data = self.convert_to_tradedata(df, orderid=pre_order.orderid, exchange=pre_order.exchange)
             self.on_trade(trade_data)
-            position_data = PositionData(symbol=code,
-                                         exchange=Exchange.HKFE,
-                                         direction=direction, volume=traded, gateway_name='FUTU')
+            position_data = PositionData(symbol=trade_data.symbol,
+                                         exchange=trade_data.exchange,
+                                         direction=trade_data.direction, volume=trade_data.traded,
+                                         gateway_name=self.gateway_name)
             self.on_position(position_data)
+
+    def _refresh_order(self):
+        for order_id, order in self._order_map.items():
+            if not order.broker_orderid:
+                continue
+
+            if order.status not in ACTIVE_STATUSES:
+                continue
+
+            query_status, new_order = self.query_order(broker_id=order.broker_orderid)
+            if query_status != RET_OK:
+                self.write_log(f"[FutuGateway] ERROR ,刷新订单状态失败,req:{req},"
+                               f"query_status{query_status},new_order_status:{new_order}"
+                               , level=LogLevel.ERROR)
+            else:
+                # 判断状态、数量是否有变化
+                new_status = self.convert_order_status(new_order['order_status'])
+                new_traded_qty = new_order['dealt_qty']
+
+                if new_status == order.status and new_traded_qty == order.traded:
+                    continue
+                else:
+                    self.on_order_update(new_order)
 
     @staticmethod
     def convert_order_status(status: str) -> OrderStatus:
@@ -258,6 +273,45 @@ class FutuGateway(BaseGateway):
             "DELETED": OrderStatus.ALLCANCELLED  # 已删除
         }
         return mapping.get(status, OrderStatus.UNKNOWN)
+
+    def convert_to_orderdata(self, df: pd.DataFrame, orderid='', exchange: Exchange = Exchange.UNKNOWN) -> OrderData:
+        order_status = self.convert_order_status(df["order_status"])
+        order_type = self.convert_order_type(futu_order_type=df['order_type'])
+        direction = self.convert_order_direction(futu_direction=df["trd_side"])
+        volume = df['qty']
+        traded = df['dealt_qty']
+        price = df['price']
+        avgfillprice = df['dealt_avg_price']
+        code = df['code']
+        reference = df['remark']
+        trade_time = pd.Timestamp.now()
+        broker_id = f'{df['order_id']}'
+
+        # 和下订单symbol、exchange保持一致
+        order_data = OrderData(symbol=code, exchange=exchange, orderid=orderid,
+                               type=order_type,
+                               direction=direction, volume=volume, price=price, gateway_name=self.gateway_name,
+                               status=order_status, traded=traded, avgFillPrice=avgfillprice,
+                               broker_orderid=broker_id, reference=reference, datetime=trade_time)
+        return order_data
+
+    def convert_to_tradedata(self, df: pd.DataFrame, orderid='', exchange: Exchange = Exchange.UNKNOWN) -> TradeData:
+        order_status = self.convert_order_status(df["order_status"])
+        direction = self.convert_order_direction(futu_direction=df["trd_side"])
+        volume = df['qty']
+        traded = df['dealt_qty']
+        price = df['price']
+        avgfillprice = df['dealt_avg_price']
+        code = df['code']
+        reference = df['remark']
+        trade_time = pd.Timestamp.now()
+        broker_id = f'{df['order_id']}'
+
+        trade_data = TradeData(symbol=code, exchange=exchange, orderid=orderid, tradeid=broker_id,
+                               direction=direction, volume=volume, price=price, gateway_name=self.gateway_name,
+                               status=order_status, traded=traded, avgFillPrice=avgfillprice, reference=reference,
+                               datetime=trade_time)
+        return trade_data
 
     def on_kline(self, df, interval: Interval):
         if df.empty:
@@ -300,7 +354,7 @@ class FutuGateway(BaseGateway):
     def close(self):
         self.trd_ctx.close()
         self.quote_ctx.close()
-        self.write_log("FutuGateway 已关闭",level=LogLevel.INFO)
+        self.write_log("FutuGateway 已关闭", level=LogLevel.INFO)
 
     # 以下是空实现，因为目前只做行情
     def subscribe(self, req):
@@ -319,7 +373,8 @@ class FutuGateway(BaseGateway):
                 res_order = self._send_order_futu(local_id, req)
             else:
                 res_order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=local_id, type=req.type,
-                                      direction=req.direction, volume=req.volume, price=req.price, gateway_name='FUTU',
+                                      direction=req.direction, volume=req.volume, price=req.price,
+                                      gateway_name=self.gateway_name,
                                       broker_orderid=None, status=OrderStatus.PENDING, trigger_price=req.trigger_price,
                                       reference=req.reference, datetime=pd.Timestamp.now())
                 self._pending_orders[local_id] = req
@@ -327,6 +382,8 @@ class FutuGateway(BaseGateway):
                 self._update_monitoring_tick_subscriptions(sub=True, symbol=req.symbol)
             self._order_map[res_order.orderid] = res_order
         self.on_order(res_order)
+        # 刷新一次订单，防止回调on_order_update早于自身的on_order触发导致错失信息
+        self._refresh_order()
 
     def _update_monitoring_tick_subscriptions(self, sub: bool, symbol: str):
         """
@@ -364,11 +421,14 @@ class FutuGateway(BaseGateway):
 
     def _send_order_futu(self, local_id, req: OrderRequest):
         res_order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=local_id, type=req.type,
-                              direction=req.direction, volume=req.volume, price=req.price, gateway_name='FUTU',
+                              direction=req.direction, volume=req.volume, price=req.price,
+                              gateway_name=self.gateway_name,
                               status=OrderStatus.SUBMITTING, reference=req.reference, datetime=pd.Timestamp.now())
         ret_unlock, res_unlock = self.trd_ctx.unlock_trade(FutuInfo.pwd_unlock)
         if ret_unlock != RET_OK:
             res_order.status = OrderStatus.REJECTED
+            self.write_log(f"[FutuGateway] ERROR ,订单被拒,req:{req},ret_unlock:{ret_unlock},res_unlock:{res_unlock}"
+                           , level=LogLevel.ERROR)
 
         trd_side = 'BUY' if req.direction == Direction.LONG else 'SELL'
         order_type = 'MARKET' if req.type in [OrderType.MARKET, OrderType.STP_MKT] else 'NORMAL'
@@ -384,6 +444,8 @@ class FutuGateway(BaseGateway):
         )
         if ret != RET_OK:
             res_order.status = OrderStatus.REJECTED
+            self.write_log(f"[FutuGateway] ERROR ,订单被拒,req:{req},ret:{ret},res:{data}"
+                           , level=LogLevel.ERROR)
         else:
             res_order.broker_orderid = data.iloc[0]['order_id']
         return res_order
@@ -407,10 +469,12 @@ class FutuGateway(BaseGateway):
 
     def cancel_order(self, req: CancelRequest):
         res_order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=req.orderid, type=OrderType.MARKET,
-                              direction=Direction.NET, volume=0, price=0, gateway_name='FUTU',
+                              direction=Direction.NET, volume=0, price=0, gateway_name=self.gateway_name,
                               status=OrderStatus.UNKNOWN, datetime=pd.Timestamp.now())
         if req.orderid not in self._order_map.keys():
             res_order.status = OrderStatus.REJECTED
+            self.write_log(f"[FutuGateway] ERROR ,订单被拒,req:{req},order_map:{self._order_map}"
+                           , level=LogLevel.ERROR)
         elif req.orderid in self._pending_orders.keys():
             with self._lock:
                 res_order.reference = self._pending_orders[req.orderid].reference
@@ -427,6 +491,10 @@ class FutuGateway(BaseGateway):
             ret_unlock, res_unlock = self.trd_ctx.unlock_trade(FutuInfo.pwd_unlock)
             if ret_unlock != RET_OK:
                 res_order.status = OrderStatus.REJECTED
+                self.write_log(
+                    f"[FutuGateway] ERROR ,"
+                    f",req:{req},ret_unlock:{ret_unlock},res_unlock:{res_unlock}"
+                    , level=LogLevel.ERROR)
 
             # 发起撤单请求，qty 和 price 参数会被忽略（CANCEL 模式下无意义）
             ret_modify_order, res_modify_order = self.trd_ctx.modify_order(
@@ -437,6 +505,11 @@ class FutuGateway(BaseGateway):
             )
             if ret_modify_order != RET_OK:
                 res_order.status = OrderStatus.REJECTED
+                self.write_log(f"[FutuGateway] ERROR ,订单被拒,req:{req},ret_cancel_order:{ret_modify_order},"
+                               f"res_cancel_order:{res_modify_order}"
+                               , level=LogLevel.ERROR)
+                # 刷新订单状态
+                self._refresh_order()
             else:
                 # futu不会返回时CANCEL_ALL或者CANCEL_PART
                 # 当向futu提交撤单且提交成功时，具体状态由on order返回
@@ -447,10 +520,12 @@ class FutuGateway(BaseGateway):
         # 只支持修改价格和数量
         # 如果在本地查询不到order信息
         res_order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=req.orderid, type=OrderType.MARKET,
-                              direction=Direction.NET, volume=req.qty, price=req.price, gateway_name='FUTU',
+                              direction=Direction.NET, volume=req.qty, price=req.price, gateway_name=self.gateway_name,
                               trigger_price=req.trigger_price, status=OrderStatus.UNKNOWN, datetime=pd.Timestamp.now())
         if req.orderid not in self._order_map.keys():
             res_order.status = OrderStatus.REJECTED
+            self.write_log(f"[FutuGateway] ERROR ,订单被拒,req:{req},order_map:{self._order_map}"
+                           , level=LogLevel.ERROR)
         # 如果order还停留在本地
         elif req.orderid in self._pending_orders.keys():
             with self._lock:
@@ -461,7 +536,7 @@ class FutuGateway(BaseGateway):
                 order_id = req.orderid
                 res_order = OrderData(symbol=res_req.symbol, exchange=res_req.exchange, orderid=order_id,
                                       type=res_req.type, direction=res_req.direction, volume=res_req.qty,
-                                      price=res_req.price, gateway_name='FUTU', broker_orderid=None,
+                                      price=res_req.price, gateway_name=self.gateway_name, broker_orderid=None,
                                       status=OrderStatus.MODIFIED, trigger_price=res_req.trigger_price,
                                       reference=res_req.reference, datetime=pd.Timestamp.now())
 
@@ -474,6 +549,9 @@ class FutuGateway(BaseGateway):
             ret_unlock, res_unlock = self.trd_ctx.unlock_trade(FutuInfo.pwd_unlock)
             if ret_unlock != RET_OK:
                 res_order.status = OrderStatus.REJECTED
+                self.write_log(
+                    f"[FutuGateway] ERROR ,订单被拒,req:{req},ret_unlock:{ret_unlock},res_unlock:{res_unlock}"
+                    , level=LogLevel.ERROR)
 
             ret_modify_order, res_modify_order = self.trd_ctx.modify_order(
                 ModifyOrderOp.NORMAL,
@@ -483,30 +561,37 @@ class FutuGateway(BaseGateway):
             )
             if ret_modify_order != RET_OK:
                 res_order.status = OrderStatus.REJECTED
+                self.write_log(f"[FutuGateway] ERROR ,订单被拒,req:{req},ret_modify_order:{ret_modify_order},"
+                               f"res_modify_order:{res_modify_order}"
+                               , level=LogLevel.ERROR)
+                # 刷新订单状态
+                self._refresh_order()
             else:
                 # 当向futu提交改单且提交成功时，具体状态由on order返回
                 return
         self.on_order(res_order)
 
-    def query_order(self, req):
+    def query_order(self, broker_id):
         # 解锁账户
         ret_unlock, res_unlock = self.trd_ctx.unlock_trade(FutuInfo.pwd_unlock)
         if ret_unlock != RET_OK:
-            raise FutuException(f'req:{req}{res_unlock}')
+            return -1, res_unlock
 
         # 查询当前订单
-        ret1, df1 = self.trd_ctx.order_list_query(order_id=req.orderid, trd_env=self.trd_env)
+        ret1, df1 = self.trd_ctx.order_list_query(order_id=broker_id, trd_env=self.trd_env)
         if ret1 == RET_OK and not df1.empty:
-            return ret1, df1
+            return 0, df1.iloc[0]
 
         # 查询历史订单（注意频率限制）
         ret2, df2 = self.trd_ctx.history_order_list_query(trd_env=self.trd_env)
         if ret2 == RET_OK:
-            match_df = df2[df2["order_id"] == req.orderid]
+            match_df = df2[df2["order_id"] == broker_id]
             if not match_df.empty:
-                return ret2, match_df
-        else:
-            raise FutuException(f'req:{req}{df2}')
+                return 0, match_df.iloc[0]
+            else:
+                return -1, f'查询不到对应订单'
+
+        return -1, f"ret1:{ret1},df1{df1},ret2:{ret2},df2{df2}"
 
     def query_history(self, req: HistoryRequest) -> list[BarData]:
         start = req.start
@@ -558,7 +643,6 @@ class FutuGateway(BaseGateway):
 
         return bars
 
-
     def query_account(self):
 
         pass
@@ -585,7 +669,7 @@ class FutuGateway(BaseGateway):
             price = position['price']
             frozen = position['can_sell_qty'] - volume
             position_data = PositionData(symbol=symbol, exchange=exchange, direction=direction, volume=volume,
-                                         frozen=frozen, price=price, gateway_name='futu')
+                                         frozen=frozen, price=price, gateway_name=self.gateway_name)
             position_list.append(position_data)
 
     @staticmethod
@@ -724,9 +808,30 @@ if __name__ == "__main__":
                        exchange=Exchange.HKFE)
     gateway.send_order(req)
 
-    req_modify = ModifyRequest(symbol='HK.MHImain', orderid='6ca7d4', exchange=Exchange.HKFE,qty=1,price=30000,trigger_price=25)
+    req_modify = ModifyRequest(symbol='HK.MHImain', orderid='6ca7d4', exchange=Exchange.HKFE, qty=1, price=30000,
+                               trigger_price=25)
     gateway.modify_order(req_modify)
-
 
     req_cancel = CancelRequest(symbol='HK.MHImain', orderid='03e55b', exchange=Exchange.HKFE)
     gateway.cancel_order(req_cancel)
+
+    data = gateway.query_order(broker_id='6935536')
+
+    self = FutuGateway(event_engine)
+
+    # 启动 Gateway，并订阅行情
+    self.connect({
+        "symbols": ['HK.MHImain'],  # 订阅标的
+        "intervals": [Interval.K_5M]  # 订阅周期
+    })
+
+    res, data = self.query_order(broker_id='6935536')
+
+    res_order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid='a', type=OrderType.MARKET,
+                          direction=Direction.NET, volume=1, price=req.price, gateway_name=self.gateway_name,
+                          trigger_price=req.trigger_price, status=OrderStatus.UNKNOWN, datetime=pd.Timestamp.now(),
+                          broker_orderid='6935536')
+    self._order_map['a'] = res_order
+    self.on_order_update(data)
+    pre_order = self.get_order_from_map(broker_id='6935536')
+    del self._order_map['a']
