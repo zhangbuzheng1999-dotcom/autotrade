@@ -37,7 +37,8 @@ class BacktestEngine:
                  matched_interval: Interval | None = None,
                  initial_cash: float = 1_000_000,
                  risk_free: float = 0.02,
-                 annual_days: int = 240, engine_id='backtest',logger=None
+                 annual_days: int = 240, engine_id='backtest', logger=None,
+                 mkt_order_match_mode: str = 'CURRENT_BAR_CLOSE'
                  ):
         """
 
@@ -47,6 +48,7 @@ class BacktestEngine:
         :param daily_update_interval: 比如要用15m或者2h更新equity或者holding profit，
                                                     就需要daily_update_interval =  Interval.K_15M
         :param matched_interval: 撮合交易用的频率
+        :param mkt_order_match_mode: 市价单交易模式,默认CURRENT_BAR_CLOSE则可以在当前bar以收盘价成交，否则在一根bar以开盘价成交
         """
         self.gateway_name = "backtest"
 
@@ -84,6 +86,9 @@ class BacktestEngine:
         self._daily_update_data = []  # 用于更新equity等的数据
         self.daily_update_interval = daily_update_interval
         self.matched_interval = matched_interval
+
+        # 成交模式
+        self.mkt_order_match_mode = mkt_order_match_mode
 
         # 回测统计
         self.backtest_res: dict = {}
@@ -224,19 +229,19 @@ class BacktestEngine:
     def _on_order_req(self, event: Event):
         req: OrderRequest = event.data
         log_data = LogData(msg=f"[BacktestEngine] 收到发送订单请求{req}")
-        self._on_log(Event(EVENT_LOG,log_data))
+        self._on_log(Event(EVENT_LOG, log_data))
         self.gateway.send_order(req)
 
     def _on_cancel_req(self, event: Event):
         req: CancelRequest = event.data
         log_data = LogData(msg=f"[BacktestEngine] 收到取消订单请求{req}")
-        self._on_log(Event(EVENT_LOG,log_data))
+        self._on_log(Event(EVENT_LOG, log_data))
         self.gateway.cancel_order(req)
 
     def _on_modify_req(self, event: Event):
         req: ModifyRequest = event.data
         log_data = LogData(msg=f"[BacktestEngine] 收到修改订单请求{req}")
-        self._on_log(Event(EVENT_LOG,log_data))
+        self._on_log(Event(EVENT_LOG, log_data))
         self.gateway.modify_order(req)
 
     def _on_log(self, event: Event):
@@ -262,11 +267,26 @@ class BacktestEngine:
     def _push_position_event(self, position: PositionData):
         self.event_engine.put(Event(EVENT_POSITION, position))
 
+    def push_log_event(self, log_data: LogData):
+        self.event_engine.put(Event(EVENT_LOG, log_data))
+
     def on_bar(self, bar: BarData):
-        self._push_bar_event(bar)
-        # 主要是解决在不同频率bar顺序传入时(例如1m和15m),gateway错误采用15m数据判断开平仓
+        """
+        撮合与策略执行顺序控制：
+        1. gateway先处理上一bar的订单（pending → active → match）
+        2. 将bar推送给策略
+        3. 若允许市价单以当前bar收盘价成交，则策略触发后立即撮合
+        """
+        # Step 1: gateway撮合上一bar订单
         if bar.interval == self.matched_interval:
             self.gateway.on_bar(bar)
+
+        # Step 2: 推送bar到策略
+        self._push_bar_event(bar)
+
+        # Step 3: 市价单当前bar收盘成交模式
+        if self.matched_interval == "CURRENT_BAR_CLOSE" and bar.interval == self.matched_interval:
+            self.gateway.fill_mkt_order(bar)
 
     def on_trade(self, trade: TradeData):
         self.oms.process_trade_event(Event(EVENT_TRADE, trade))
@@ -286,11 +306,11 @@ class BacktestEngine:
         self.oms.renew_unrealized_pnl(updated_data)
         account = deepcopy(self.oms.get_account("BACKTEST"))
         self.account_daily[self.update_datetime] = {'cash': account.cash,
-                                                     'margin': account.margin,
-                                                     'realized_pnl': account.realized_pnl,
-                                                     'unrealized_pnl': account.unrealized_pnl,
-                                                     'equity': account.equity,
-                                                     'available': account.available}
+                                                    'margin': account.margin,
+                                                    'realized_pnl': account.realized_pnl,
+                                                    'unrealized_pnl': account.unrealized_pnl,
+                                                    'equity': account.equity,
+                                                    'available': account.available}
         self.contract_daily[self.update_datetime] = deepcopy(self.oms.get_contract_log())
         self.position_daily[self.update_datetime] = deepcopy(self.oms.get_all_positions())
 
@@ -338,6 +358,7 @@ class BacktestEngine:
                 "volume": trade.volume,
                 "avgFillPrice": trade.avgFillPrice,
                 "status": trade.status,
+                "reference": trade.reference
             }
             for trade in self.oms.trade_log
         ])
@@ -464,5 +485,3 @@ class BacktestEngine:
         backtest_plot.render(plot_path)
         print(f"\n====================")
         print(f"回测图输出到{plot_path}")
-
-

@@ -1,15 +1,13 @@
 from datetime import datetime
 import uuid
-
-from sqlalchemy.sql.functions import current_date
-
 from coreutils.object import (ModifyRequest, CancelRequest,
                               OrderRequest,
                               OrderData,
                               BarData,
-                              TradeData, PositionData)
+                              TradeData, PositionData, LogData)
 
-from coreutils.constant import Direction, OrderType, OrderStatus
+from coreutils.constant import Direction, OrderType, OrderStatus,LogLevel
+
 
 class BacktestGateway:
     """
@@ -40,6 +38,9 @@ class BacktestGateway:
         # 待激活订单：{symbol: {orderid: OrderData}}
         self.inactive_orders: dict[str, dict[str, OrderData]] = {}
 
+        # 待提交订单(订单时间小于等于当前交易所current_date的订单)：{symbol: {orderid: OrderData}}
+        self.pending_orders: dict[str, dict[str, OrderData]] = {}
+
         # 回测引擎
         self.backtest_engine = backtest_engine
 
@@ -57,18 +58,17 @@ class BacktestGateway:
         order = req.create_order_data(orderid, self.gateway_name)
         order.datetime = self.current_date
         symbol = order.symbol
+        order.status = OrderStatus.PENDING
 
         if symbol not in self.active_orders:
             self.active_orders[symbol] = {}
         if symbol not in self.inactive_orders:
             self.inactive_orders[symbol] = {}
+        if symbol not in self.pending_orders:
+            self.pending_orders[symbol] = {}
 
-        if order.type in [OrderType.LIMIT, OrderType.MARKET]:
-            order.status = OrderStatus.SUBMITTING
-            self.active_orders[symbol][orderid] = order
-        elif order.type in [OrderType.STP_LMT, OrderType.STP_MKT]:
-            order.status = OrderStatus.PENDING
-            self.inactive_orders[symbol][orderid] = order
+        # 订单先进入pending_pool等待撮合
+        self.pending_orders[symbol][orderid] = order
 
         self.on_order(order)
         return orderid
@@ -83,44 +83,57 @@ class BacktestGateway:
             order = self.active_orders[symbol].pop(oid)
         elif oid in self.inactive_orders.get(symbol, {}):
             order = self.inactive_orders[symbol].pop(oid)
+        elif oid in self.pending_orders.get(symbol, {}):
+            order = self.pending_orders[symbol].pop(oid)
+        else:
+            order = OrderData(symbol=req.symbol,orderid=oid,gateway_name=self.gateway_name,
+                              exchange=req.exchange,reference='订单不存在',status=OrderStatus.REJECTED)
+            log_data = LogData(msg=
+                               f"[Backtest Gateway] 撤单失败,req:{req},订单不存在",
+                               level=LogLevel.ERROR)
+            self.write_log(log_data)
 
         if order and order.status not in [OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED]:
             order.status = OrderStatus.ALLCANCELLED
             order.datetime = self.current_date
             self.on_order(order)
+        else:
+            log_data = LogData(msg=
+                               f"[Backtest Gateway] 撤单失败,req:{req},订单不可撤销",
+                               level=LogLevel.ERROR)
+            self.write_log(log_data)
 
     def modify_order(self, req: ModifyRequest):
         """修改订单：按 symbol 定位"""
         symbol = req.symbol
         oid = req.orderid
-        order = self.active_orders.get(symbol, {}).get(oid) or self.inactive_orders.get(symbol, {}).get(oid)
+        order = (self.active_orders.get(symbol, {}).get(oid)
+                 or self.inactive_orders.get(symbol, {}).get(oid)
+                 or self.pending_orders.get(symbol, {}).get(oid))
 
         if not order:
-            reference = f"[警告] 修改失败，订单 {oid} 不存在,req:{req},current_date:{self.current_date}"
-            print(reference)
-            order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=req.orderid, type=OrderType.MARKET,
-                              direction=Direction.LONG, volume=req.qty, price=req.price, gateway_name=self.gateway_name,
-                              status=OrderStatus.REJECTED, traded=0, avgFillPrice=0,
-                              broker_orderid=None, reference=reference)
-            self.on_order(order)
+            log_data = LogData(msg=
+                               f"[Backtest Gateway] 修改失败，订单 {oid} 不存在,req:{req},current_date:{self.current_date}",
+                               level=LogLevel.ERROR)
+            self.write_log(log_data)
             return
 
         if order.status in [OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED, OrderStatus.PARTCANCELLED]:
-            reference = f"[警告] 修改失败，订单 {oid} 状态={order.status}"
-            order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=req.orderid, type=OrderType.MARKET,
-                              direction=Direction.LONG, volume=req.qty, price=req.price, gateway_name=self.gateway_name,
-                              status=OrderStatus.REJECTED, traded=0, avgFillPrice=0,
-                              broker_orderid=None, reference=reference)
+            order.status = OrderStatus.REJECTED
+            log_data = LogData(msg=
+                               f"[Backtest Gateway] 修改失败，订单 {oid} 状态={order.status}",
+                               level=LogLevel.ERROR)
+            self.write_log(log_data)
             self.on_order(order)
             return
 
         if req.qty < order.traded:
-            reference = f"[警告] 修改失败，新数量 {req.qty} 小于已成交数量 {order.traded}"
-            order = OrderData(symbol=req.symbol, exchange=req.exchange, orderid=req.orderid, type=OrderType.MARKET,
-                              direction=Direction.LONG, volume=req.qty, price=req.price, gateway_name=self.gateway_name,
-                              status=OrderStatus.REJECTED, traded=0, avgFillPrice=0,
-                              broker_orderid=None, reference=reference)
+            order.status = OrderStatus.REJECTED
             self.on_order(order)
+            log_data = LogData(msg=
+                               f"[Backtest Gateway] 修改失败 新数量 {req.qty} 小于已成交数量 {order.traded}",
+                               level=LogLevel.ERROR)
+            self.write_log(log_data)
             return
 
         order.price = req.price
@@ -128,6 +141,14 @@ class BacktestGateway:
         order.trigger_price = req.trigger_price
         order.status = OrderStatus.MODIFIED
         order.datetime = self.current_date
+
+        # 修改订单后重新进入pending pool
+        if oid in self.active_orders.get(symbol, {}):
+            order = self.active_orders[symbol].pop(oid)
+        elif oid in self.inactive_orders.get(symbol, {}):
+            order = self.inactive_orders[symbol].pop(oid)
+
+        self.pending_orders[symbol][oid] = order
 
         self.on_order(order)
 
@@ -138,10 +159,22 @@ class BacktestGateway:
         """
         symbol = bar.symbol
         self.current_date = bar.datetime
-        # Step 1: 激活止损单
+
+        # Step 1: 提交pending pool订单
+        for oid, order in list(self.pending_orders.get(symbol, {}).items()):
+            if bar.datetime > order.datetime:
+                order.status = OrderStatus.SUBMITTING
+                if order.type in [OrderType.LIMIT, OrderType.MARKET, OrderType.ABS_LMT]:
+                    self.active_orders[symbol][oid] = order
+                elif order.type in [OrderType.STP_LMT, OrderType.STP_MKT]:
+                    self.inactive_orders[symbol][oid] = order
+                else:
+                    raise Exception(f'未知订单类型"{order}')
+                del self.pending_orders[symbol][oid]
+
+        # Step 2: 激活止损单
         for oid, order in list(self.inactive_orders.get(symbol, {}).items()):
             if self._stop_trigger(order, bar):
-                order.status = OrderStatus.PENDING
                 order.datetime = self.current_date
                 # 记录触发在哪根bar
                 order.triggered_bar = bar.datetime
@@ -150,12 +183,21 @@ class BacktestGateway:
                 del self.inactive_orders[symbol][oid]
                 self.on_order(order)
 
-        # Step 2: 撮合激活订单
+        # Step 3: 撮合激活订单
         for oid, order in list(self.active_orders.get(symbol, {}).items()):
             if order.status in [OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED]:
                 continue
 
-            if order.type in [OrderType.MARKET, OrderType.STP_MKT]:
+            # 市价统一同开盘价成交
+            # 在bar成交开关放在backtest_engine中 todo
+            if order.type == OrderType.MARKET:
+                close_price = bar.open_price
+                self._fill_order(order, close_price)
+                del self.active_orders[symbol][oid]
+
+            elif order.type == OrderType.STP_MKT:
+                # 例如开盘100,条件价120,则订单在开盘后激活,买入价120
+                # 若开盘100,条件价90,则订单开盘瞬间激活,买入价100
                 if order.direction == Direction.LONG:
                     close_price = max(order.trigger_price, bar.open_price)
                 else:
@@ -164,14 +206,14 @@ class BacktestGateway:
                 self._fill_order(order, close_price)
                 del self.active_orders[symbol][oid]
 
-            elif order.type in [OrderType.ABS_LMT]:
+            elif order.type == OrderType.ABS_LMT:
                 if self._can_fill_absolute(order, bar):
                     self._fill_order(order, order.price)
                     del self.active_orders[symbol][oid]
 
             elif order.type in [OrderType.LIMIT, OrderType.STP_LMT]:
                 if self._can_fill(order, bar):
-                    # 如果是 STP_LMT 并且刚刚在这根 bar 被触发
+                    # 如果是 STP_LMT 在这当前bar触发则以盘中限价成交
                     if order.type == OrderType.STP_LMT and getattr(order, "triggered_bar", None) == bar.datetime:
                         # 当根 bar 内只能盘中成交 → 给限价
                         self._fill_order(order, order.price)
@@ -179,6 +221,20 @@ class BacktestGateway:
                         # 普通限价逻辑（允许开盘成交）
                         self._fill_order(order, self._get_fill_price(order, bar))
                     del self.active_orders[symbol][oid]
+
+    def fill_mkt_order(self, bar: BarData):
+        """
+        调用此函数，将把当前symbol的pending市价单以收盘价成交。
+        该逻辑仅在允许市价单在当前bar收盘成交时调用。
+        """
+        symbol = bar.symbol
+        self.current_date = bar.datetime
+
+        for oid, order in list(self.pending_orders.get(symbol, {}).items()):
+            if order.type == OrderType.MARKET:
+                fill_price = bar.close_price
+                self._fill_order(order, fill_price)
+                del self.pending_orders[symbol][oid]
 
     def _stop_trigger(self, order: OrderData, bar: BarData) -> bool:
         return (order.direction == Direction.LONG and bar.high_price >= order.trigger_price) or \
@@ -234,6 +290,7 @@ class BacktestGateway:
                                      exchange=order.exchange,
                                      direction=order.direction, volume=order.volume, gateway_name=self.gateway_name)
         self.on_position(position_data)
+
     def get_orders(self) -> list[OrderData]:
         """返回所有未完成订单"""
         orders = []
@@ -245,6 +302,9 @@ class BacktestGateway:
 
     def on_order(self, order: OrderData) -> None:
         self.backtest_engine.on_order(order)
+
+    def write_log(self, log_data: LogData):
+        self.backtest_engine.push_log_event(log_data)
 
     def on_trade(self, trade: TradeData) -> None:
         self.backtest_engine.on_trade(trade)

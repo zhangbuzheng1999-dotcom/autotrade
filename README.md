@@ -451,161 +451,217 @@ BACKTEST GATEWAY  除了承担和实盘GATEWAY中提供与交易相关的send、
 
 ### 1.1.1  模拟交易所
 
-好的，我按你给的叙述方式，写成一段 **README 风格、简洁清晰** 的说明，并把触发条件改成“大括号公式”。
+![image-20251102054113449](./assets/image-20251102054113449.png)
 
-#### 1.1.1.1 接收订单（`send_order`）
+订单主要分成三个池子，待提交订单pending_orders、条件订单订单inactive_orders、非条件订单active_orders。
 
-会根据 **订单类型** 将订单分入 `inactive_orders` 或 `active_orders`：
+#### 1.1.1.1 待提交订单(send_order\modify_order)
 
-```python
-if order.type in [OrderType.LIMIT, OrderType.MARKET]:
-    order.status = OrderStatus.SUBMITTING
-    self.active_orders[symbol][orderid] = order
-elif order.type in [OrderType.STP_LMT, OrderType.STP_MKT]:
-    order.status = OrderStatus.PENDING
-    self.inactive_orders[symbol][orderid] = order
+在回测系统中，策略下单或修改订单时，系统会立即为订单打上当前时间戳：
+
+```
+order.datetime = self.current_date
 ```
 
-------
+然后先将订单放入「待提交池」（`pending_orders`）：
 
-#### 1.1.1.2 撮合模块（`on_bar`）
+```
+self.pending_orders[symbol][orderid] = order
+```
 
-**1）接收 bar data**（仅处理 `bar.symbol`）
-**2）判断 inactive 订单是否应触发**，命中则移入 `active_orders` 并回调：
+这样设计的核心目的是 **避免未来函数（look-ahead bias）**。
+
+> 在回测中，`on_bar()` 会用当前 bar 的数据（开盘、最高、最低、收盘）进行撮合。
+>  若订单在策略发出当根 bar 内立即生效，就等于在“知道了本根 bar 的收盘价”后立刻参与本根的交易，属于使用未来信息。
+
+因此，**所有新订单都必须至少等到下一根 bar** 才能进入真实撮合逻辑。
+
+
+
+假设现在是 **1月2日收盘时**，策略发出一个限价单：
+
+> 以价格 100 买入。
+
+此时系统执行：
+
+```
+order.datetime = 2025-01-02
+pending_orders["AAPL"][oid] = order
+```
+
+然后当 **1月3日** 的 `on_bar(bar)` 被调用时，才会检查：
+
+```
+if bar.datetime > order.datetime:
+    # 订单才进入 active/inactive，允许撮合
+```
+
+也就是说，这个订单会在 **1月3日的开盘价或盘中价** 才可能成交。
+
+
+
+#### 1.1.1.2 on bar
+
+**Step 1: 提交pending pool订单**
+
+判断订单发出时间和交易所时间，当交易所时间大于订单发出时间时，将pending_orders根据不同的订单类型转入active/inactive
+
+```python
+if bar.datetime > order.datetime:
+    order.status = OrderStatus.SUBMITTING
+    if order.type in [OrderType.LIMIT, OrderType.MARKET, OrderType.ABS_LMT]:
+        self.active_orders[symbol][oid] = order
+    elif order.type in [OrderType.STP_LMT, OrderType.STP_MKT]:
+        self.inactive_orders[symbol][oid] = order
+    else:
+        raise Exception(f'未知订单类型"{order}')
+    del self.pending_orders[symbol][oid]
+```
+
+
+
+**Step 2: 激活条件订单 inactive_orders**
+
+这一步判断条件订单是否触及，若触及则将条件订单inactive_orders转入非条件订单active_orders
+
+令 $\bar{H}=\text{bar.high\_price}$，$\bar{L}=\text{bar.low\_price}$，$\tau=\text{order.trigger\_price}$：
+
+$\text{Trigger}(order,bar)= \begin{cases} \bar{H}\ \ge\ \tau, & \text{Direction}=\text{LONG} \\\\ \bar{L}\ \le\ \tau, & \text{Direction}=\text{SHORT} \end{cases}$
 
 ```python
 if self._stop_trigger(order, bar):
-    order.status = OrderStatus.PENDING
     order.datetime = self.current_date
+    # 记录触发在哪根bar
+    order.triggered_bar = bar.datetime
 
     self.active_orders[symbol][oid] = order
     del self.inactive_orders[symbol][oid]
     self.on_order(order)
 ```
 
-**触发判断逻辑**
- 令 $\bar{H}=\text{bar.high\_price}$，$\bar{L}=\text{bar.low\_price}$，$\tau=\text{order.trigger\_price}$：
-
-$\text{Trigger}(order,bar)= \begin{cases} \bar{H}\ \ge\ \tau, & \text{Direction}=\text{LONG} \\\\ \bar{L}\ \le\ \tau, & \text{Direction}=\text{SHORT} \end{cases}$
-
-> 触发后订单进入 `active_orders`，状态为 `PENDING`，并通过 `on_order` 发回一次回报。
-
-
-
-**3）判断active订单是否应该成交**
-
-```
-        for oid, order in list(self.active_orders.get(symbol, {}).items()):
-            if order.status in [OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED]:
-                continue
-
-            if order.type in [OrderType.MARKET, OrderType.STP_MKT]:
-                if order.direction == Direction.LONG:
-                    close_price = max(order.trigger_price, bar.open_price)
-                else:
-                    close_price = min(order.trigger_price, bar.open_price)
-
-                self._fill_order(order, close_price)
-                del self.active_orders[symbol][oid]
-            elif order.type in [OrderType.ABS_LMT]:
-                if self._can_fill_absolute(order, bar):
-                    self._fill_order(order, order.price)
-                    del self.active_orders[symbol][oid]
-            elif order.type in [OrderType.LIMIT, OrderType.STP_LMT]:
-                if self._can_fill(order, bar):
-                    self._fill_order(order, self._get_fill_price(order, bar))
-                    del self.active_orders[symbol][oid]
+```python
+def _stop_trigger(self, order: OrderData, bar: BarData) -> bool:
+    return (order.direction == Direction.LONG and bar.high_price >= order.trigger_price) or \
+        (order.direction == Direction.SHORT and bar.low_price <= order.trigger_price)
 
 ```
 
 
 
-记 $\bar{H}=\text{bar.high\_price}$、$\bar{L}=\text{bar.low\_price}$、$\bar{O}=\text{bar.open\_price}$、$P=\text{order.price}$、$\tau=\text{order.trigger\_price}$。
+**Step 3: 撮合非条件订单 active_orders**
 
-- **市价 / 止损市价（`MARKET / STP_MKT`）**
+**1)   市价单（`OrderType.MARKET`）**
 
-​	**成交价：**
-$$
-\text{px}=
-\begin{cases}
-\max(\tau,\ \bar{O}), & \text{Direction}=\text{LONG} \\\\
-\min(\tau,\ \bar{O}), & \text{Direction}=\text{SHORT}
-\end{cases}
-$$
-​	命中即成，随后 `_fill_order(order, px)` 并从 `active_orders` 删除。
+**成交条件：**
 
-------
+- 市价单在下一根 bar 的开盘直接成交，不受价格限制。
 
-- **绝对限价（`ABS_LMT`）**
+**成交价格：**
 
-​	**可成交条件：**
-$$
-\bar{L}\ \le\ P\ \le\ \bar{H}
-$$
-​	**成交价：**
-$$
-\text{px}=P
-$$
-​	满足则 `_fill_order(order, P)` 并从 `active_orders` 删除。
+- 统一以 `bar.open_price` 成交。
+- 表示“下一根周期开盘立即以当时市场价成交”。
+
+```
+close_price = bar.open_price
+self._fill_order(order, close_price)
+```
 
 ------
 
-- **常规限价 / 止损限价（`LIMIT / STP_LMT`）**
+**2)  条件市价单（`OrderType.STP_MKT`）**
 
-​	**可成交条件：**
-$$
-\begin{cases}
-\bar{L}\ \le\ P, & \text{Direction}=\text{LONG} \\\\
-\bar{H}\ \ge\ P, & \text{Direction}=\text{SHORT}
-\end{cases}
-$$
-​	**成交价（当前实现，来自 `_get_fill_price`）：**
-$$
-\text{px}=
-\begin{cases}
-P, & \text{LONG 且 } P\le \bar{O} \\\\
-\bar{O}, & \text{LONG 且 } P>\bar{O} \\\\
-P, & \text{SHORT 且 } P\ge \bar{O} \\\\
-\bar{O}, & \text{SHORT 且 } P< \bar{O}
-\end{cases}
-$$
-​	随后 `_fill_order(order, px)` 并从 `active_orders` 删除。
+**成交条件：**
 
-> 注：等价口径——**开盘即可成交 → 用订单价 $P$**；**盘中才触达 → 用开盘价 $\bar{O}$**。
+- 当价格触及触发价（`trigger_price`）时激活并立即成交；
 
+**成交价格：**
 
+- 若条件价在开盘时即被触发：用 `bar.open_price` 成交；
+- 若在开盘后被触发：
+  - 多单（`LONG`） → 成交价 = `max(trigger_price, bar.open_price)`
+  - 空单（`SHORT`） → 成交价 = `min(trigger_price, bar.open_price)`
 
+ 模拟了“止损市价单（Stop Market）”行为,当价格突破触发位后立刻按市价成交。
 
+------
 
-### 1.1.2  Gateway 
+**3)  绝对限价单（`OrderType.ABS_LMT`）**
 
-**send_order()**
+**成交条件：**
 
-- 生成 `OrderData`，按类型入簿并回报：
-  - `LIMIT / MARKET` → 放入 `active_orders[symbol]`，`status = SUBMITTING`
-  - `STP_LMT / STP_MKT` → 放入 `inactive_orders[symbol]`，`status = PENDING`
-- 调用 `on_order()` 回报当前状态；返回 `orderid`。
+- 若当前 bar 的价格区间包含该限价（即：`low_price <= price <= high_price`）则成交。
 
-**cancel_order()**
+**成交价格：**
 
-- 在 `active_orders` / `inactive_orders` 中定位并移除。
-- 若未终态，置 `ALLCANCELLED`，更新时间戳，`on_order()` 回报。
+- 以订单限价 `order.price` 成交（不考虑开盘价）。
 
-**modify_order()**
+**说明：**
 
-- 按 `symbol + orderid` 定位。
-- 校验：不存在 / 已终态（`ALLTRADED/ALLCANCELLED/PARTCANCELLED`）/ 新数量小于已成交 → 构造一笔 `REJECTED` 并 `on_order()`。
-- 否则更新 `price / volume / trigger_price`，置 `MODIFIED`，更新时间戳，`on_order()`。
+- `ABS_LMT` 表示“只要价格经过该价位就必定成交”；
 
-**get_orders()**
+------
 
-- 汇总返回当前**未完成**订单（`active + inactive`）。
+**4) 普通限价单（`OrderType.LIMIT`）**
 
-**回调出口**
+**成交条件：**
 
-- `on_order()`、`on_trade()`、`on_position()`：将订单/成交/持仓回报**向上层转发**（不处理资金与风控）。
+- 多单（`LONG`）：若最低价 ≤ 限价，则可成交；
+- 空单（`SHORT`）：若最高价 ≥ 限价，则可成交。
 
+```
+_can_fill:
+    LONG → bar.low_price <= order.price
+    SHORT → bar.high_price >= order.price
+```
 
+**成交价格：**
+
+- 若开盘价即可满足条件 → 用 `bar.open_price` 成交；
+- 否则（盘中触发） → 用订单限价 `order.price` 成交。
+
+```
+if bar.open_price <= order.price:  # LONG
+    return bar.open_price
+else:
+    return order.price
+```
+
+这种逻辑同时模拟了“开盘即成交”与“盘中触发成交”两种情况；
+
+------
+
+**5) 条件限价单（`OrderType.STP_LMT`）**
+
+**成交条件：**
+
+1. 当 `bar` 高/低价触及 `trigger_price` 时激活；
+2. 激活后作为普通限价单（LIMIT）处理。
+
+```
+_stop_trigger:
+    LONG → bar.high_price >= trigger_price
+    SHORT → bar.low_price <= trigger_price
+```
+
+**成交价格：**
+
+- 如果在当前 bar 被触发：
+   → 只能“盘中限价成交”（以 `order.price` 成交）；
+- 如果在前一 bar 已触发（即上一周期进入 active_orders）：
+   → 按普通限价逻辑，可开盘成交（`min(open, limit)`）。
+
+```
+if order.type == STP_LMT and triggered_bar == bar.datetime:
+    self._fill_order(order, order.price)
+else:
+    self._fill_order(order, self._get_fill_price(order, bar))
+```
+
+**说明：**
+
+- 模拟止损限价单（Stop Limit）；
+- 即：触发后变成限价单，但可能因价格跳空未成交；
+- 触发当根 bar 只允许盘中成交，防止“即触发即开盘成交”的未来函数问题。
 
 
 
@@ -979,6 +1035,116 @@ print("回测结束")
 ```
 
 这里判断是否需要调用_update_daily的依据是更新频率如果选择的是2h，当2h的数据从9:30切换到11:30，就默认2h数据已经全部走完，需要更新浮盈。这么处理的好处是：1.对于多symbol，避免每一次2h都要调用更新，然后在oms中寻找对应symbol的从而节省开销；2.在记录回测时，避免重复(避免不同symbol各记录一次快照)
+
+
+
+on_bar是k线推动核心模块：
+
+```
+def on_bar(self, bar: BarData):
+    """
+    撮合与策略执行顺序控制：
+    1. gateway先处理上一bar的订单（pending → active → match）
+    2. 将bar推送给策略
+    3. 若允许市价单以当前bar收盘价成交，则策略触发后立即撮合
+    """
+    # Step 1: gateway撮合上一bar订单
+    if bar.interval == self.matched_interval:
+        self.gateway.on_bar(bar)
+
+    # Step 2: 推送bar到策略
+    self._push_bar_event(bar)
+
+    # Step 3: 市价单当前bar收盘成交模式
+    if self.matched_interval == "CURRENT_BAR_CLOSE" and bar.interval == self.matched_interval:
+        self.gateway.fill_mkt_order(bar)
+```
+
+为了避免未来函数，**bar 必须先交给 gateway 撮合上一根 K 线的挂单，再交给策略处理**。
+
+------
+
+假设情景：日线回测，策略基于昨日信号下单
+
+我们有一个最简单的布林带策略：
+
+> **规则**：
+>
+> - 昨日收盘价高于布林带中轨 → 明日开盘买入
+> - 否则空仓。
+
+数据：
+
+| 日期   | 开盘 | 最高 | 最低 | 收盘 |
+| ------ | ---- | ---- | ---- | ---- |
+| 1月1日 | 100  | 102  | 99   | 101  |
+| 1月2日 | 102  | 104  | 100  | 103  |
+
+------
+
+两种不同的时序设计
+
+**错误的设计**（策略先收到 bar）
+
+```text
+on_bar():
+    Step1: 推送 bar 给策略（策略看到1月2日）
+        策略判断：收盘=103>中轨 → 产生买入信号
+        策略立刻发出买入订单
+    Step2: Gateway 撮合订单（使用 bar=1月2日）
+```
+
+→ 策略在看到 **1月2日的收盘价=103** 时，
+ 就立刻用 **1月2日的开盘价=102** 进行买入。
+
+问题：
+ 这等于用未来数据（1月2日收盘）指导了 1月2日的开盘成交，
+ 产生了“未来函数偏差”，
+ 回测结果会比真实情况好得多。
+
+**正确的设计**（gateway 先撮合，再推送策略）
+
+```text
+on_bar():
+    Step1: Gateway 撮合（使用 bar=1月2日）
+        把前一根 bar（1月1日）的挂单执行成交
+    Step2: 推送 bar 给策略
+        策略看到 1月2日数据 → 发出买入信号
+        生成订单，等待下一根 bar 撮合
+```
+
+→ 策略在看到 **1月2日的收盘=103** 时发单，
+ 但该订单要等到 **1月3日开盘价** 才会成交。
+
+好处：
+
+- 时序严格模拟实盘；
+- 策略逻辑与数据因果关系一致；
+- 不会提前知道“未来收盘”。
+
+
+
+流程差异
+
+```text
+时间轴（每日）：
+
+┌──────────────────────────────────────────────────────┐
+│ 1月1日 bar 结束 → 策略仍在持仓等待                   │
+│ 1月2日开盘 → Gateway撮合 1月1日 发出的挂单           │
+│       ↓                                             │
+│ 1月2日结束 → 策略收到bar(1月2日) → 产生信号 → 下单   │
+│ 1月3日开盘 → Gateway撮合 1月2日发出的挂单            │
+└──────────────────────────────────────────────────────┘
+```
+
+总结
+
+| 步骤       | 动作                   | 原因                                                |
+| ---------- | ---------------------- | --------------------------------------------------- |
+| **Step 1** | Gateway 先撮合         | 保证上一个 bar 的订单在当前 bar 开盘价执行          |
+| **Step 2** | 推送 bar 给策略        | 让策略使用“当前 bar 收盘价”做决策                   |
+| **Step 3** | （可选）市价单收盘成交 | 若用户显式选择允许当前 bar 收盘价成交（如日内模型） |
 
 
 
@@ -1402,7 +1568,9 @@ engine.get_account_daily_df().to_csv(f'macd_account.csv')
 
 事件引擎是一个**生产者-消费者**模型的回调分发器——各处把 `Event(type, data)` 丢进线程安全队列，后台**Worker 线程**不断取出并按事件类型把它们**回调**给已注册的处理函数；同时 **Timer 线程**按固定间隔自动产生日历事件（`eTimer`）。
 
-### 运行逻辑（流程一看就懂）
+
+
+**运行逻辑**
 
 1. **注册订阅**：用 `register(type, handler)` 订阅某类事件；用 `register_general(handler)` 订阅**所有**事件（常用于日志/监控）。
 2. **启动引擎**：`start()` 同时启动两个后台线程：

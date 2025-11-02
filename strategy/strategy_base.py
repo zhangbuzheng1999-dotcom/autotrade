@@ -163,8 +163,26 @@ class StrategyBase:
         targets: Dict[str, TargetOrder] = {}
         return targets
 
-    # ===================== 执行（按键限频 + 赛跑幂等） =====================
+    # ===================== clOrdId / Request 构造 =====================
+    def _mk_place_req(self, tgt: TargetOrder) -> OrderRequest:
+        return OrderRequest(
+            symbol=tgt.symbol, exchange=self.exchange,
+            direction=tgt.direction, type=tgt.type,
+            price=tgt.price, volume=abs(tgt.volume), trigger_price=tgt.trigger_price,
+            reference=tgt.reference
+        )
 
+    def _mk_modify_req(self, live: OrderData, tgt: TargetOrder, ) -> ModifyRequest:
+        return ModifyRequest(
+            orderid=live.orderid, symbol=tgt.symbol, exchange=self.exchange,
+            qty=abs(tgt.volume),
+            price=tgt.price, trigger_price=tgt.price
+        )
+
+    def _mk_cancel_req(self, live: OrderData) -> CancelRequest:
+        return CancelRequest(orderid=live.orderid, symbol=self.vt_symbol, exchange=self.exchange)
+
+    # ===================== 执行（按键限频 + 赛跑幂等） =====================
     def _execute(self, plan: List[Tuple[str, ModifyRequest | OrderRequest | CancelRequest]]):
         for act, req in plan:
             if act == "place":
