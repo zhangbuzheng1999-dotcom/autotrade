@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autotrade"
+version = "0.1.0"
+description = "A quantitative trading framework"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "zhangbuzheng" }
+]
+dependencies = [
+    "basis==0.1.0",
+    "bcrypt==4.3.0",
+    "fastapi==0.116.2",
+    "futu_api==9.3.5308",
+    "numpy>=1.24,<3.0",
+    "pandas==2.3.2",
+    "pyecharts==2.0.8",
+    "PyJWT==2.10.1",
+    "pymysql==1.1.1",
+    "pytest==8.4.1",
+    "python-dotenv==1.1.1",
+    "pyzmq==26.2.0",
+    "Requests==2.32.4",
+    "SQLAlchemy==2.0.41",
+    "uvicorn==0.35.0",
+    "websockets==15.0.1"
+]
+
+[project.urls]
+Homepage = "https://github.com/zhangbuzheng1999-dotcom/autotrade"
+
+[project.scripts]
+autotrade-ws = "autotrade.conn.ws_hub:main"
+
+[tool.setuptools.packages.find]
+include = ["autotrade", "autotrade.*"]
+
+[tool.setuptools]
+include-package-data = true

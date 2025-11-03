@@ -1,3 +1,28 @@
+Metadata-Version: 2.4
+Name: autotrade
+Version: 0.1.0
+Summary: A quantitative trading framework
+Author: zhangbuzheng
+Project-URL: Homepage, https://github.com/zhangbuzheng1999-dotcom/autotrade
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: basis==0.1.0
+Requires-Dist: bcrypt==4.3.0
+Requires-Dist: fastapi==0.116.2
+Requires-Dist: futu_api==9.3.5308
+Requires-Dist: numpy<3.0,>=1.24
+Requires-Dist: pandas==2.3.2
+Requires-Dist: pyecharts==2.0.8
+Requires-Dist: PyJWT==2.10.1
+Requires-Dist: pymysql==1.1.1
+Requires-Dist: pytest==8.4.1
+Requires-Dist: python-dotenv==1.1.1
+Requires-Dist: pyzmq==26.2.0
+Requires-Dist: Requests==2.32.4
+Requires-Dist: SQLAlchemy==2.0.41
+Requires-Dist: uvicorn==0.35.0
+Requires-Dist: websockets==15.0.1
+
 ---
 
 ---
