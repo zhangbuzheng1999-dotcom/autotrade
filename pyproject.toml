@@ -7,7 +7,7 @@ name = "autotrade"
 version = "0.1.0"
 description = "A quantitative trading framework"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
     { name = "zhangbuzheng" }
 ]
