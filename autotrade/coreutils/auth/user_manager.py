@@ -37,3 +37,24 @@ class UserManager:
         cur.execute("SELECT password_hash FROM users WHERE username=?", (username,))
         row = cur.fetchone()
         return bool(row and bcrypt.checkpw(password.encode(), row[0].encode()))
+
+    def delete_user(self, username: str) -> bool:
+        """删除指定用户，返回是否成功删除"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM users WHERE username=?", (username,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def count_users(self) -> int:
+        """返回数据库中用户数量"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        (count,) = cur.fetchone()
+        return count
+
+    def list_users(self) -> list[str]:
+        """列出所有用户名"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT username FROM users ORDER BY id ASC")
+        rows = cur.fetchall()
+        return [r[0] for r in rows]

@@ -41,7 +41,7 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
                level=logging.INFO, to_console: bool = True):
     """
     获取一个 logger 实例，支持日志文件切分，并扩展 .wechat(title, content) 推送功能。
-
+    日志统一写入当前运行目录下的 logs 文件夹中;若 logs 文件夹不存在，则自动创建。
     参数:
     ----------
     name : str
@@ -66,9 +66,15 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
     logging.Logger 实例，包含额外扩展方法 logger.wechat(title, content)
     """
 
-    log_dir = 'logs'
-    os.makedirs(log_dir, exist_ok=True)
-    logfile_path = os.path.join(log_dir, logfile)
+    # 获取当前运行脚本所在工作目录
+    base_dir = Path(os.getcwd())
+
+    # 在当前目录下创建 logs 目录
+    log_dir = base_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 拼接日志文件路径
+    logfile_path = log_dir / logfile
 
     logger = logging.getLogger(name)
 
@@ -146,10 +152,15 @@ def get_logger(name: str = 'main', logfile: str = 'run.log',
 class LoggerEngine:
     def __init__(self, event_engine, engine_id, LOG_DIR=None,to_console=True):
         self.event_engine = event_engine
+        # 如果没有传 LOG_DIR，使用当前目录/logs/
         if LOG_DIR is None:
-            BASE_DIR = self.get_base_dir()
-            LOG_DIR = str((BASE_DIR / "logs" / f'{engine_id}.log').resolve())  # 日志最好放在/autotrade/logs里面，方便app读取
-            print(f'LOG_DIR: {LOG_DIR}')
+            base_dir = Path(os.getcwd())
+            log_dir = base_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            LOG_DIR = log_dir / f"{engine_id}.log"
+
+        LOG_DIR = Path(LOG_DIR).resolve()
+        print(f"LOG_DIR: {LOG_DIR}")
 
         self.logger = get_logger(name=engine_id, logfile=LOG_DIR,to_console=to_console)
         self.event_engine.register(EVENT_LOG, self._on_log)

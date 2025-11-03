@@ -382,10 +382,10 @@ APP的flutter项目会放在git仓库里，里面会有一个安卓的apk安装�
 在这个文件中，根据自己的服务器或者主机地址填写host 和port
 
 ```
+from autotrade.conn.ws_hub import run_ws
+
 if __name__ == "__main__":
-    host = "0.0.0.0"
-    port = 8000
-    uvicorn.run(app, host=host, port=port)
+        run_ws(host="0.0.0.0", port=8000)
 ```
 
 3）在实盘代码中实例化EngineMesAdapter

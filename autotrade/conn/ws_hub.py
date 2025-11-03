@@ -1,6 +1,10 @@
 # conn/ws_hub.py
 from __future__ import annotations
 import asyncio, time, jwt, contextlib, json
+import sys
+# ---- Windows 兼容性修复 ----
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Set
 
@@ -278,11 +282,27 @@ async def ws_endpoint(ws: WebSocket):
             await ws.close()
 
 
-if __name__ == "__main__":
-    # 便于手动跑：预置一个用户
-    user_manager.add_user("testuser", "testpassword")
-    host = "10.1.20.5"
-    port = 8000
-    print("[ws_hub] listening on %s:%d" % (host, port))
-    uvicorn.run(app, host=host, port=port)
+def run_ws(host: str = "127.0.0.1", port: int = 8000):
+    """
+    启动 WS Hub 服务
+    - 自动检测用户数据库是否为空
+    - 提示用户如何添加新用户
+    """
+    from autotrade.coreutils.auth.user_manager import UserManager
+    import uvicorn
+
+    user_manager = UserManager()
+    user_count = user_manager.count_users()
+
+    if user_count == 0:
+        print(
+            "\033[93m[WARNING]\033[0m 当前用户数据库为空，请先创建用户：\n"
+            "  >>> from autotrade.coreutils.auth.user_manager import UserManager\n"
+            "  >>> um = UserManager()\n"
+            "  >>> um.add_user('your_username', 'your_password')\n"
+        )
+
+    print(f"[ws_hub] listening on {host}:{port}")
+    uvicorn.run("autotrade.conn.ws_hub:app", host=host, port=port, reload=False)
+
 

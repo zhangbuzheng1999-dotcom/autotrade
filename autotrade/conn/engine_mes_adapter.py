@@ -57,7 +57,8 @@ class EngineMesAdapter:
             event_engine: EventEngine,
             oms: OmsBase,
             pub_endpoint: str = "tcp://127.0.0.1:7001",  # 引擎 -> 中心 (Hub SUB.bind)
-            sub_endpoint: str = "tcp://127.0.0.1:7002",  # 中心 -> 引擎 (Hub PUB.bind)
+            sub_endpoint: str = "tcp://127.0.0.1:7002",  # 中心 -> 引擎 (Hub PUB.bind),
+            log_dir: Optional[str] = None,
     ) -> None:
         self.engine_id = engine_id
         self.event_engine = event_engine
@@ -85,6 +86,7 @@ class EngineMesAdapter:
         self._log_re = re.compile(
             r"^\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:[.,](\d{1,3}))?\s*\[(\w+)\]\s*(.*)$"
         )
+        self.log_dir = log_dir
 
     # ---------- 生命周期 ----------
     def start(self) -> None:
@@ -476,10 +478,13 @@ class EngineMesAdapter:
 
         today = datetime.now().date()
         base = f"{self.engine_id}.log"
+        # 如果传了 log_dir 并且存在，就用它
+        log_dir = self.log_dir if (self.log_dir and os.path.isdir(self.log_dir)) else "logs"
+
         if day == today:
-            return os.path.join("logs", base)
+            return os.path.join(log_dir, base)
         else:
-            return os.path.join("logs", f"{base}.{day.strftime('%Y-%m-%d')}")
+            return os.path.join(log_dir, f"{base}.{day.strftime('%Y-%m-%d')}")
 
     def _try_parse_dt(self, s: str) -> Optional[datetime]:
         """
