@@ -2,12 +2,11 @@
 from enum import Enum
 import pandas as pd
 from abc import ABC
+from autotrade.coreutils.object import FetchResult
+from autotrade.coreutils.constant import FetchStatus, FetchMode
+import logging
 
-
-class FetchMode(str, Enum):
-    DB_ONLY = "db_only"  # 只查数据库
-    SOURCE_ONLY = "source_only"  # 只拉数据源
-    DB_THEN_SOURCE = "db_then_source"  # 先查库，不足再拉
+logger = logging.getLogger("autotrade.service")
 
 
 class BaseService(ABC):
@@ -24,7 +23,7 @@ class BaseService(ABC):
             date=None,
             start_date=None,
             end_date=None,
-    ) -> pd.DataFrame:
+    ) -> FetchResult:
 
         params = dict(
             ts_code=ts_code,
@@ -34,24 +33,30 @@ class BaseService(ABC):
             end_date=end_date,
         )
 
-        if mode == FetchMode.DB_ONLY:
-            return self._query_db(**params)
+        try:
+            if mode == FetchMode.DB_ONLY:
+                df = self._query_db(**params)
+                return FetchResult(FetchStatus.SUCCESS, data=df)
 
-        if mode == FetchMode.SOURCE_ONLY:
-            df = self._fetch_source(**params)
+            if mode == FetchMode.SOURCE_ONLY:
+                df = self._fetch_source(**params)
+                if persist:
+                    self._persist(df)
+                return FetchResult(FetchStatus.SUCCESS, data=df)
+
+            # DB_THEN_SOURCE
+            df_db = self._query_db(**params)
+            if not df_db.empty:
+                return FetchResult(FetchStatus.SUCCESS, data=df_db)
+
+            df_src = self._fetch_source(**params)
             if persist:
-                self._persist(df)
-            return df
+                self._persist(df_src)
+            return FetchResult(FetchStatus.SUCCESS, data=df_src)
 
-        # DB_THEN_SOURCE
-        df_db = self._query_db(**params)
-        if not df_db.empty:
-            return df_db
-
-        df_src = self._fetch_source(**params)
-        if persist:
-            self._persist(df_src)
-        return df_src
+        except Exception as e:
+            logger.error("service get failed", exc_info=e)
+            return FetchResult(FetchStatus.FAILED, error=e)
 
     # ===============================
     # 默认行为（可被覆盖）

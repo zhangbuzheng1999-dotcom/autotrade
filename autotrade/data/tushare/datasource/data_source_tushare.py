@@ -4,7 +4,6 @@ from autotrade.coreutils.config import TushareInfo
 import tushare as ts
 from typing import Optional
 import time
-import pandas as pd
 from typing import Callable
 
 
@@ -107,14 +106,10 @@ class TusharePaginator:
                 if attempt < self.max_retry:
                     time.sleep(self.retry_sleep)
                 else:
-                    # 最终失败，记录即可，不抛异常
-                    print(
-                        f"[WARN] Tushare request failed after {self.max_retry} retries. "
-                        f"params={params}. error={e}"
-                    )
-                    return None
-
-        return None
+                    raise RuntimeError(
+                        f"Tushare request failed after {self.max_retry} retries, "
+                        f"params={params}"
+                    ) from e
 
 
 # ===============期权数据===================
@@ -380,14 +375,16 @@ if __name__ == "__main__":
     load_env("d:/.env")
 
     basic = TushareEtfFundAdj()
-    a = basic.fetch(ts_code='159238.SZ',start_date='20250104')
-    a.columns
+    res = basic.fetch(ts_code='159238.SZ',exchange='a', start_date='20250104')
+
+
     import tushare as ts
+
     # token秘钥（把给咱们的token复制过来哈）
     token = "f5d21f83664a2e928757d8ae18a8c0a1e58f28e72b0560b196bed1c91672"
     pro = ts.pro_api(token)
     pro._DataApi__token = token  # 保证有这个代码，不然不可以获取
     pro._DataApi__http_url = 'https://jiaoch.site'  # 保证有这个代码，不然不可以获取
     # 测试接口(换成自己的接口）
-    df = pro.daily(ts_code='000001.SZ', start_date='20180701', end_date='20180718')
-    print(df)
+    res = pro.daily(ts_code='000001.SZ', start_date='20180701', end_date='20180718')
+    print(res)

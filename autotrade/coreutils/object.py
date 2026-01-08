@@ -4,7 +4,9 @@ Basic data structure used for general trading function in the trading platform.
 
 from dataclasses import dataclass, field
 from datetime import datetime as Datetime
-from autotrade.coreutils.constant import Direction, Exchange, Interval, Offset, OrderStatus, Product, OptionType, OrderType,LogLevel
+from autotrade.coreutils.constant import FetchStatus, Direction, Exchange, Interval, Offset, OrderStatus, Product, \
+    OptionType, OrderType, LogLevel
+from typing import Generic, TypeVar, Optional
 
 INFO: int = 20
 
@@ -174,6 +176,7 @@ class OrderData(BaseData):
             "vt_orderid": self.vt_orderid,
         }
 
+
 @dataclass
 class TradeData(BaseData):
     """
@@ -304,6 +307,7 @@ class LogData:
     def __post_init__(self) -> None:
         """"""
         self.time: Datetime = Datetime.now()
+
 
 @dataclass
 class ContractData(BaseData):
@@ -522,3 +526,17 @@ class QuoteRequest:
             gateway_name=gateway_name,
         )
         return quote
+
+
+T = TypeVar("T")
+
+
+@dataclass(slots=True)
+class FetchResult(Generic[T]):
+    status: FetchStatus
+    data: Optional[T] = None
+    error: Optional[Exception] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == FetchStatus.SUCCESS

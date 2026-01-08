@@ -2,7 +2,7 @@
 General constant enums used in the trading platform.
 """
 
-from enum import Enum
+from enum import Enum, IntEnum
 import pandas as pd
 from functools import total_ordering
 import math
@@ -168,6 +168,7 @@ class LogLevel(Enum):
     WARNING = "WARNING"
     ERROR = "ERROR"
 
+
 class CMD(Enum):
     """
     CMD.
@@ -204,3 +205,13 @@ class Interval(Enum):
         if isinstance(other, Interval):
             return float(self.value) < float(other.value)
         return NotImplemented
+
+
+class FetchStatus(IntEnum):
+    SUCCESS = 0
+    FAILED = -1
+
+class FetchMode(str, Enum):
+    DB_ONLY = "db_only"  # 只查数据库
+    SOURCE_ONLY = "source_only"  # 只拉数据源
+    DB_THEN_SOURCE = "db_then_source"  # 先查库，不足再拉
