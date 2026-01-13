@@ -37,6 +37,7 @@ Homepage = "https://github.com/zhangbuzheng1999-dotcom/autotrade"
 autotrade-ws = "autotrade.conn.ws_hub:main"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["autotrade", "autotrade.*"]
 
 [tool.setuptools]
