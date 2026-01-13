@@ -368,6 +368,112 @@ class TushareEtfFundAdj(BaseDataSource, BaseTushareSource):
 
         return self.paginator.fetch(filters=filters, fields=self.FIELDS)
 
+class TushareFutBasicSource(BaseDataSource, BaseTushareSource):
+    MAX_LIMIT = 10000
+
+    FIELDS = [
+        "ts_code",
+        "symbol",
+        "exchange",
+        "name",
+        "fut_code",
+        "multiplier",
+        "trade_unit",
+        "per_unit",
+        "quote_unit",
+        "quote_unit_desc",
+        "d_mode_desc",
+        "list_date",
+        "delist_date",
+        "d_month",
+        "last_ddate"
+    ]
+
+    def __init__(self, *, pro=None, token=None):
+        BaseTushareSource.__init__(
+            self,
+            token=TushareInfo.token,
+        )
+        self.paginator = TusharePaginator(
+            api_func=self.pro.fut_basic,
+            limit=self.MAX_LIMIT,
+        )
+
+    def _fetch_impl(
+            self,
+            *,
+            ts_code,
+            exchange,
+            date,
+            start_date,
+            end_date,
+    ) -> pd.DataFrame:
+        # date ????????????
+        if start_date or end_date:
+            raise ValueError("TushareFutBasicSource does not support date range")
+
+        filters = {
+            "ts_code": ts_code or "",
+            "exchange": exchange or "",
+            "list_date": date or "",
+        }
+
+        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+
+
+class TushareFutDaily(BaseDataSource, BaseTushareSource):
+    MAX_LIMIT = 2000
+
+    FIELDS = [
+        "ts_code",
+        "trade_date",
+        "pre_close",
+        "pre_settle",
+        "open",
+        "high",
+        "low",
+        "close",
+        "settle",
+        "change1",
+        "change2",
+        "vol",
+        "amount",
+        "oi",
+        "oi_chg"
+    ]
+
+    def __init__(self, *, pro=None, token=None):
+        BaseTushareSource.__init__(
+            self,
+            token=TushareInfo.token,
+        )
+        self.paginator = TusharePaginator(
+            api_func=self.pro.fut_daily,
+            limit=self.MAX_LIMIT,
+        )
+
+    def _fetch_impl(
+            self,
+            *,
+            ts_code,
+            exchange,
+            date,
+            start_date,
+            end_date,
+    ) -> pd.DataFrame:
+        # date ????????????
+        if date is not None:
+            start_date = date
+            end_date = date
+
+        filters = {
+            "ts_code": ts_code or "",
+            "exchange": exchange or "",
+            "start_date": start_date or "",
+            "end_date": end_date or "",
+        }
+
+        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
 
 if __name__ == "__main__":
     from autotrade.coreutils.config import load_env

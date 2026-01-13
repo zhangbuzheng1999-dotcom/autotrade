@@ -135,7 +135,67 @@ class EtfFundAdjRepository(BaseRepository):
             end_date=end_date,
         )
 
+# ================ 期货数据 ====================
+class FutBasicRepository(BaseRepository):
+    DATABASE = "futures_data"
+    TABLE = "fut_basic"
 
+    TS_CODE_FIELD = "ts_code"
+    EXCHANGE_FIELD = "exchange"
+    DATE_FIELD = "list_date"
+
+    def query(
+            self,
+            *,
+            ts_code=None,
+            exchange=None,
+            date=None,
+            start_date=None,
+            end_date=None,
+    ):
+        if start_date or end_date:
+            raise ValueError(
+                "fut_basic does not support date range query; "
+                "use `date` (list_date) instead"
+            )
+
+        return super().query(
+            ts_code=ts_code,
+            exchange=exchange,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+
+class FutDailyRepository(BaseRepository):
+    DATABASE = "futures_data"
+    TABLE = "fut_daily"
+
+    TS_CODE_FIELD = "ts_code"
+    DATE_FIELD = "trade_date"
+
+    def query(
+            self,
+            *,
+            ts_code=None,
+            exchange=None,
+            date=None,
+            start_date=None,
+            end_date=None,
+    ):
+        if exchange:
+            raise ValueError(
+                "FutDailyRepository does not support exchange query; "
+
+            )
+
+        return super().query(
+            ts_code=ts_code,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+        )
 if __name__ == "__main__":
     from autotrade.coreutils.config import load_env
 

@@ -3,10 +3,12 @@ import pandas as pd
 from autotrade.data.tushare.service.base import BaseService, FetchMode
 from autotrade.data.tushare.datasource.data_source_tushare import (
     TushareOptBasicSource, TushareOptDailySource,
-    TushareEtfBasicSource, TushareEtfFundDaily, TushareEtfFundAdj)
+    TushareEtfBasicSource, TushareEtfFundDaily, TushareEtfFundAdj,
+    TushareFutBasicSource,TushareFutDaily)
 from autotrade.data.tushare.repository.repo_tushare import (
     OptionBasicRepository, OptionDailyRepository,
-    EtfBasicRepository, EtfFundDailyRepository, EtfFundAdjRepository)
+    EtfBasicRepository, EtfFundDailyRepository, EtfFundAdjRepository,
+    FutBasicRepository, FutDailyRepository)
 
 
 class OptionDailyService(BaseService):
@@ -43,6 +45,18 @@ class EtfFundAdjService(BaseService):
         self.source = TushareEtfFundAdj()
         self.repo = EtfFundAdjRepository()
 
+class FutBasicService(BaseService):
+
+    def __init__(self):
+        self.source = TushareFutBasicSource()
+        self.repo = FutBasicRepository()
+
+
+class FutDailyService(BaseService):
+
+    def __init__(self):
+        self.source = TushareFutDaily()
+        self.repo = FutDailyRepository()
 
 if __name__ == "__main__":
     from autotrade.coreutils.config import load_env

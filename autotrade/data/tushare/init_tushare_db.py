@@ -1009,12 +1009,25 @@ def create_futures_data():
     cursor.execute("use futures_data ")
 
     # 期货合约信息表
-    cursor.execute("""CREATE TABLE IF NOT EXISTS future_basic
-    		(ts_code VARCHAR(20),symbol VARCHAR(20),exchange VARCHAR(20),name VARCHAR(20),fut_code VARCHAR(20),
-    		`multiplier`  DECIMAL(14,4),trade_unit VARCHAR(20),per_unit DECIMAL(15,6),quote_unit VARCHAR(20),
-    		quote_unit_desc TEXT,d_mode_desc VARCHAR(20),list_date DATE,delist_date DATE,d_month VARCHAR(20),
-    		last_ddate DATE
-    		);
+    cursor.execute("""        CREATE TABLE IF NOT EXISTS fut_basic (
+            ts_code VARCHAR(30) NOT NULL,
+            symbol VARCHAR(20),
+            exchange VARCHAR(10),
+            name VARCHAR(100),
+            fut_code VARCHAR(20),
+            multiplier DECIMAL(20,4),
+            trade_unit VARCHAR(20),
+            per_unit DECIMAL(20,4),
+            quote_unit VARCHAR(20),
+            quote_unit_desc VARCHAR (100),
+            d_mode_desc VARCHAR(100),
+            list_date DATE,
+            delist_date DATE,
+            d_month VARCHAR(10),
+            last_ddate DATE,
+            trade_time_desc TEXT,
+            PRIMARY KEY (ts_code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     		""")
 
     # 交易日历
@@ -1024,47 +1037,53 @@ def create_futures_data():
     		""")
 
     # 期货日线行情
-    cursor.execute("""CREATE TABLE IF NOT EXISTS future_daily
-    		(ts_code VARCHAR(20),trade_date DATE,pre_close DECIMAL(17,6),pre_settle DECIMAL(17,6),open DECIMAL(17,6),
-    		high DECIMAL(17,6),low DECIMAL(17,6),close DECIMAL(17,6),settle DECIMAL(17,6),change1 DECIMAL(16,6),
-    		change2 DECIMAL(16,6),vol DECIMAL(18,6),amount DECIMAL(19,6),oi DECIMAL(18,6),oi_chg DECIMAL(17,6)
-    		)
-                PARTITION BY RANGE COLUMNS(trade_date) (
-                    PARTITION p1990 VALUES LESS THAN ('19910101'),
-                    PARTITION p1991 VALUES LESS THAN ('19920101'),
-                    PARTITION p1992 VALUES LESS THAN ('19930101'),
-                    PARTITION p1993 VALUES LESS THAN ('19940101'),
-                    PARTITION p1994 VALUES LESS THAN ('19950101'),
-                    PARTITION p1995 VALUES LESS THAN ('19960101'),
-                    PARTITION p1996 VALUES LESS THAN ('19970101'),
-                    PARTITION p1997 VALUES LESS THAN ('19980101'),
-                    PARTITION p1998 VALUES LESS THAN ('19990101'),
-                    PARTITION p1999 VALUES LESS THAN ('20000101'),
-                    PARTITION p2000 VALUES LESS THAN ('20010101'),
-                    PARTITION p2001 VALUES LESS THAN ('20020101'),
-                    PARTITION p2002 VALUES LESS THAN ('20030101'),
-                    PARTITION p2003 VALUES LESS THAN ('20040101'),
-                    PARTITION p2004 VALUES LESS THAN ('20050101'),
-                    PARTITION p2005 VALUES LESS THAN ('20060101'),
-                    PARTITION p2006 VALUES LESS THAN ('20070101'),
-                    PARTITION p2007 VALUES LESS THAN ('20080101'),
-                    PARTITION p2008 VALUES LESS THAN ('20090101'),
-                    PARTITION p2009 VALUES LESS THAN ('20100101'),
-                    PARTITION p2010 VALUES LESS THAN ('20110101'),
-                    PARTITION p2011 VALUES LESS THAN ('20120101'),
-                    PARTITION p2012 VALUES LESS THAN ('20130101'),
-                    PARTITION p2013 VALUES LESS THAN ('20140101'),
-                    PARTITION p2014 VALUES LESS THAN ('20150101'),
-                    PARTITION p2015 VALUES LESS THAN ('20160101'),
-                    PARTITION p2016 VALUES LESS THAN ('20170101'),
-                    PARTITION p2017 VALUES LESS THAN ('20180101'),
-                    PARTITION p2018 VALUES LESS THAN ('20190101'),
-                    PARTITION p2019 VALUES LESS THAN ('20200101'),
-                    PARTITION p2020 VALUES LESS THAN ('20210101'),
-                    PARTITION p2021 VALUES LESS THAN ('20220101'),
-                    PARTITION p2022 VALUES LESS THAN ('20230101'),
-                    PARTITION p2023 VALUES LESS THAN ('20240101'),
-                    PARTITION p2024 VALUES LESS THAN ('20250101'));
+    cursor.execute("""CREATE TABLE IF NOT EXISTS fut_daily (
+            ts_code VARCHAR(30) NOT NULL COMMENT 'TS合约代码',
+            trade_date DATE NOT NULL COMMENT '交易日期',
+        
+            pre_close   DECIMAL(16,6) COMMENT '昨收盘价',
+            pre_settle  DECIMAL(16,6) COMMENT '昨结算价',
+            open        DECIMAL(16,6) COMMENT '开盘价',
+            high        DECIMAL(16,6) COMMENT '最高价',
+            low         DECIMAL(16,6) COMMENT '最低价',
+            close       DECIMAL(16,6) COMMENT '收盘价',
+            settle      DECIMAL(16,6) COMMENT '结算价',
+        
+            change1     DECIMAL(16,6) COMMENT '涨跌1 收盘价-昨结算价',
+            change2     DECIMAL(16,6) COMMENT '涨跌2 结算价-昨结算价',
+        
+            vol         DECIMAL(20,4) COMMENT '成交量(手)',
+            amount      DECIMAL(20,4) COMMENT '成交金额(万元)',
+            oi          DECIMAL(20,4) COMMENT '持仓量(手)',
+            oi_chg      DECIMAL(20,4) COMMENT '持仓量变化',
+        
+            delv_settle DECIMAL(16,6) COMMENT '交割结算价',
+        
+            -- 主键：分区键在前，保证顺序写
+            PRIMARY KEY (trade_date, ts_code),
+        
+            -- 常用查询索引：按合约查历史
+            KEY idx_ts_code_date (ts_code, trade_date)
+        )
+        ENGINE=InnoDB
+        ROW_FORMAT=DYNAMIC
+        DEFAULT CHARSET=utf8mb4
+        PARTITION BY RANGE COLUMNS (trade_date)
+        (
+            -- 历史异常兜底
+            PARTITION p_lt_2000 VALUES LESS THAN ('2000-01-01'),
+        
+            -- 五年一分（主写入区）
+            PARTITION p2000_2004 VALUES LESS THAN ('2005-01-01'),
+            PARTITION p2005_2009 VALUES LESS THAN ('2010-01-01'),
+            PARTITION p2010_2014 VALUES LESS THAN ('2015-01-01'),
+            PARTITION p2015_2019 VALUES LESS THAN ('2020-01-01'),
+            PARTITION p2020_2024 VALUES LESS THAN ('2025-01-01'),
+            PARTITION p2025_2029 VALUES LESS THAN ('2030-01-01'),
+        
+            -- 未来兜底
+            PARTITION p_ge_2030 VALUES LESS THAN (MAXVALUE)
+        );
     		""")
 
     # 每日成交持仓排名 ！！要以trade_date和exchange获取
