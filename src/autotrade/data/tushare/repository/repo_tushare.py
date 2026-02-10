@@ -7,14 +7,15 @@ class OptionBasicRepository(BaseRepository):
     DATABASE = "option_data"
     TABLE = "option_basic"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     EXCHANGE_FIELD = "exchange"
     DATE_FIELD = "list_date"
 
     def query(
             self,
             *,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -27,7 +28,8 @@ class OptionBasicRepository(BaseRepository):
             )
 
         return super().query(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             exchange=exchange,
             date=date,
             start_date=start_date,
@@ -39,7 +41,7 @@ class OptionDailyRepository(BaseRepository):
     DATABASE = "option_data"
     TABLE = "option_daily"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     EXCHANGE_FIELD = "exchange"
     DATE_FIELD = "trade_date"
 
@@ -48,14 +50,15 @@ class EtfBasicRepository(BaseRepository):
     DATABASE = "etf_data"
     TABLE = "etf_basic"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     EXCHANGE_FIELD = "exchange"
     DATE_FIELD = "list_date"
 
     def query(
             self,
             *,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -68,7 +71,8 @@ class EtfBasicRepository(BaseRepository):
             )
 
         return super().query(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             exchange=exchange,
             date=date,
             start_date=start_date,
@@ -80,13 +84,14 @@ class EtfFundDailyRepository(BaseRepository):
     DATABASE = "etf_data"
     TABLE = "fund_daily"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     DATE_FIELD = "trade_date"
 
     def query(
             self,
             *,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -99,7 +104,8 @@ class EtfFundDailyRepository(BaseRepository):
             )
 
         return super().query(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             date=date,
             start_date=start_date,
             end_date=end_date,
@@ -110,13 +116,14 @@ class EtfFundAdjRepository(BaseRepository):
     DATABASE = "etf_data"
     TABLE = "fund_adj"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     DATE_FIELD = "trade_date"
 
     def query(
             self,
             *,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -129,25 +136,28 @@ class EtfFundAdjRepository(BaseRepository):
             )
 
         return super().query(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             date=date,
             start_date=start_date,
             end_date=end_date,
         )
+
 
 # ================ 期货数据 ====================
 class FutBasicRepository(BaseRepository):
     DATABASE = "futures_data"
     TABLE = "fut_basic"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     EXCHANGE_FIELD = "exchange"
     DATE_FIELD = "list_date"
 
     def query(
             self,
             *,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -160,7 +170,8 @@ class FutBasicRepository(BaseRepository):
             )
 
         return super().query(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             exchange=exchange,
             date=date,
             start_date=start_date,
@@ -172,13 +183,14 @@ class FutDailyRepository(BaseRepository):
     DATABASE = "futures_data"
     TABLE = "fut_daily"
 
-    TS_CODE_FIELD = "ts_code"
+    CODE_FIELD = "ts_code"
     DATE_FIELD = "trade_date"
 
     def query(
             self,
             *,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -191,11 +203,14 @@ class FutDailyRepository(BaseRepository):
             )
 
         return super().query(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             date=date,
             start_date=start_date,
             end_date=end_date,
         )
+
+
 if __name__ == "__main__":
     from autotrade.coreutils.config import load_env
 
@@ -204,5 +219,5 @@ if __name__ == "__main__":
 
     create_etf_data()
 
-    etf = EtfFundDailyRepository()
-    etf.query()
+    etf = OptionBasicRepository()
+    etf.query(code='LH2603-C-11800.DCE')

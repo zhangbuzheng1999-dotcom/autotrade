@@ -100,7 +100,7 @@ class BaseRepository:
     DATABASE: str | None = None
 
     DATE_FIELD: str | None = None
-    TS_CODE_FIELD: str | None = None
+    CODE_FIELD: str | None = None
     EXCHANGE_FIELD: str | None = None
 
     # 批量参数（可按表覆盖）
@@ -134,16 +134,18 @@ class BaseRepository:
     # 查询（不变）
     # ===============================
     def query(
-        self,
-        *,
-        ts_code: str | None = None,
-        exchange: str | None = None,
-        date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
+            self,
+            *,
+            code: str | None = None,
+            code_list: list[str] | None = None,
+            exchange: str | None = None,
+            date: str | None = None,
+            start_date: str | None = None,
+            end_date: str | None = None,
     ) -> pd.DataFrame:
         where, params = self._build_where(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             exchange=exchange,
             date=date,
             start_date=start_date,
@@ -162,35 +164,53 @@ class BaseRepository:
                 return pd.read_sql(sql, conn, params=params)
 
     def _build_where(
-        self,
-        *,
-        ts_code,
-        exchange,
-        date,
-        start_date,
-        end_date,
+            self,
+            *,
+            code,
+            code_list,
+            exchange,
+            date,
+            start_date,
+            end_date,
     ):
         clauses = []
         params = []
 
-        if ts_code is not None and self.TS_CODE_FIELD:
-            clauses.append(f"{self.TS_CODE_FIELD} = %s")
-            params.append(ts_code)
+        # -------- code / code_list --------
+        if code is not None and code_list is not None:
+            raise ValueError("Only one of code or code_list allowed")
 
+        if code is not None and self.CODE_FIELD:
+            clauses.append(f"{self.CODE_FIELD} = %s")
+            params.append(code)
+
+        elif code_list is not None and self.CODE_FIELD:
+            if not code_list:
+                # 空 list，直接返回空结果
+                return "WHERE 1=0", []
+
+            placeholders = ",".join(["%s"] * len(code_list))
+            clauses.append(f"{self.CODE_FIELD} IN ({placeholders})")
+            params.extend(code_list)
+
+        # -------- exchange --------
         if exchange is not None and self.EXCHANGE_FIELD:
             clauses.append(f"{self.EXCHANGE_FIELD} = %s")
             params.append(exchange)
 
+        # -------- date --------
         if date is not None and self.DATE_FIELD:
             clauses.append(f"{self.DATE_FIELD} = %s")
             params.append(date)
 
+        # -------- date range --------
         if (start_date is not None or end_date is not None) and self.DATE_FIELD:
             clauses.append(f"{self.DATE_FIELD} BETWEEN %s AND %s")
             params.extend([start_date, end_date])
 
         if clauses:
             return "WHERE " + " AND ".join(clauses), params
+
         return "", params
 
     # ===============================

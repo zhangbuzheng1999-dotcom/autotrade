@@ -63,6 +63,6 @@ if __name__ == "__main__":
 
     load_env("d:/.env")
 
-    etf_basic = EtfFundAdjService()
-    a = etf_basic.get(mode=FetchMode.SOURCE_ONLY, ts_code="159238.SZ", persist=True,exchange='a')
+    etf_basic = OptionBasicService()
+    a = etf_basic.get(mode=FetchMode.DB_THEN_SOURCE, code_list=["159238.SZ",'LH2603-C-11600.DCE','LH2603-C-12200.DCE'], persist=True)
 

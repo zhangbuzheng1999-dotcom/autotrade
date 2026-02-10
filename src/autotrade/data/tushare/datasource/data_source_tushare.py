@@ -12,66 +12,113 @@ class BaseTushareSource:
     """
     Base class for Tushare-based data sources.
 
-    Priority:
-    1. pro (explicit)
-    2. token (explicit)
-    3. token from config
-    """
-
-    def __init__(self, *, pro=None, token: Optional[str] = None, default_token: str | None = None):
-        if pro is not None:
-            self.pro = pro
-            return
-
-        if token is not None:
-            pro = ts.pro_api(token)
-            pro._DataApi__token = token  # 保证有这个代码，不然不可以获取
-            pro._DataApi__http_url = 'https://jiaoch.site'  # 保证有这个代码，不然不可以获取
-            self.pro = pro
-            return
-
-        if default_token is None:
-            raise ValueError("No tushare token provided")
-
-        ts.set_token(default_token)
-        self.pro = ts.pro_api()
-
-
-class TusharePaginator:
-    """
-    Generic paginator for Tushare pro APIs with retry support.
+    Rule:
+    - NEVER use ts.set_token
+    - ALWAYS construct pro explicitly
     """
 
     def __init__(
             self,
-            api_func: Callable,
             *,
+            pro=None,
+            token: Optional[str] = None,
+            default_token: Optional[str] = None,
+            http_url: str = "https://jiaoch.site",
+    ):
+        # 1️⃣ 外部传入 pro，最高优先级（用于测试 / mock）
+        if pro is not None:
+            self.pro = pro
+            return
+
+        # 2️⃣ 决定 token
+        token = token or default_token
+        if not token:
+            raise ValueError("No tushare token provided")
+
+        # 3️⃣ 显式构造 pro（关键）
+        pro = ts.pro_api(token)
+
+        # 🔴 私有源必须显式设置
+        pro._DataApi__token = token
+        pro._DataApi__http_url = http_url
+
+        self.pro = pro
+
+
+class TushareExecutor:
+    """
+    Unified executor for tushare APIs.
+
+    Responsibilities:
+    - pagination
+    - retry
+    - code / code_list dispatch
+    """
+
+    def __init__(
+            self,
+            *,
+            api_func: Callable,
             limit: int,
+            build_filters: Callable,
             sleep: float = 0.3,
             max_retry: int = 3,
             retry_sleep: float = 1.0,
     ):
         self.api_func = api_func
         self.limit = limit
+        self.build_filters = build_filters
         self.sleep = sleep
         self.max_retry = max_retry
         self.retry_sleep = retry_sleep
 
+    # ===============================
+    # public entry
+    # ===============================
     def fetch(
             self,
-            filters: dict,
-            fields: list[str] | None = None,
+            *,
+            code=None,
+            code_list=None,
+            fields=None,
+            **kwargs,
     ) -> pd.DataFrame:
+
+        if code and code_list:
+            raise ValueError("Only one of code or code_list allowed")
+
+        # -------- single code / no code_list --------
+        if code or not code_list:
+            filters = self.build_filters(code=code, **kwargs)
+            return self._fetch_paginated(filters, fields)
+
+        # -------- code_list --------
+        dfs = []
+        for c in code_list:
+            filters = self.build_filters(code=c, **kwargs)
+            df = self._fetch_paginated(filters, fields)
+            if df is not None and not df.empty:
+                dfs.append(df)
+            time.sleep(self.sleep)
+
+        if not dfs:
+            return pd.DataFrame()
+
+        return pd.concat(dfs, ignore_index=True)
+
+    # ===============================
+    # internals
+    # ===============================
+    def _fetch_paginated(self, filters: dict, fields):
         offset = 0
-        dfs: list[pd.DataFrame] = []
+        dfs = []
 
         while True:
             params = dict(filters)
             params["limit"] = self.limit
             params["offset"] = offset
-            df = self._fetch_with_retry(params, fields)
 
-            # 拉不到数据，直接结束
+            df = self._fetch_with_retry(params, fields)
             if df is None or df.empty:
                 break
 
@@ -80,36 +127,25 @@ class TusharePaginator:
             if len(df) < self.limit:
                 break
 
-            print(f'QUERY DATA :{offset}')
             offset += self.limit
             time.sleep(self.sleep)
 
         if not dfs:
             return pd.DataFrame()
 
-        dfs = [df for df in dfs if df is not None and not df.empty]
-
         return pd.concat(dfs, ignore_index=True)
 
-    def _fetch_with_retry(self, params: dict, fields: list[str] | None):
-        """
-        Fetch one page with retry.
-        """
-        last_exception = None
-
+    def _fetch_with_retry(self, params: dict, fields):
         for attempt in range(1, self.max_retry + 1):
             try:
                 return self.api_func(**params, fields=fields)
-
             except Exception as e:
-                last_exception = e
-                if attempt < self.max_retry:
-                    time.sleep(self.retry_sleep)
-                else:
+                if attempt >= self.max_retry:
                     raise RuntimeError(
                         f"Tushare request failed after {self.max_retry} retries, "
                         f"params={params}"
                     ) from e
+                time.sleep(self.retry_sleep)
 
 
 # ===============期权数据===================
@@ -140,33 +176,50 @@ class TushareOptBasicSource(BaseDataSource, BaseTushareSource):
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
-        self.paginator = TusharePaginator(
+
+        self.executor = TushareExecutor(
             api_func=self.pro.opt_basic,
             limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        if start_date or end_date:
-            raise ValueError("opt_basic does not support date range")
-
-        filters = {
-            "ts_code": ts_code or "",
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(self, *, code, exchange=None, date=None, **_):
+        return {
+            "ts_code": code or "",
             "exchange": exchange or "",
             "list_date": date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+            self,
+            *,
+            code=None,
+            code_list=None,
+            exchange=None,
+            date=None,
+            start_date=None,
+            end_date=None,
+    ) -> pd.DataFrame:
+        if start_date or end_date:
+            raise ValueError("opt_basic does not support date range")
 
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            exchange=exchange,
+            date=date,
+            fields=self.FIELDS,
+        )
 
 class TushareOptDailySource(BaseDataSource, BaseTushareSource):
     MAX_LIMIT = 15000
@@ -190,36 +243,64 @@ class TushareOptDailySource(BaseDataSource, BaseTushareSource):
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
-        )
-        self.paginator = TusharePaginator(
-            api_func=self.pro.opt_daily,
-            limit=self.MAX_LIMIT,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        # date 语义优先
+        self.executor = TushareExecutor(
+            api_func=self.pro.opt_daily,
+            limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
+        )
+
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(
+        self,
+        *,
+        code,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+        **_,
+    ):
+        # 单日语义 → 区间
         if date is not None:
             start_date = date
             end_date = date
 
-        filters = {
-            "ts_code": ts_code or "",
+        return {
+            "ts_code": code or "",
             "exchange": exchange or "",
             "start_date": start_date or "",
             "end_date": end_date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
-
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+        self,
+        *,
+        code=None,
+        code_list=None,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+    ) -> pd.DataFrame:
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            exchange=exchange,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+            fields=self.FIELDS,
+        )
 
 # ===============ETF数据===================
 class TushareEtfBasicSource(BaseDataSource, BaseTushareSource):
@@ -239,40 +320,56 @@ class TushareEtfBasicSource(BaseDataSource, BaseTushareSource):
         "mgr_name",
         "custod_name",
         "mgt_fee",
-        "etf_type"
+        "etf_type",
     ]
 
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
-        self.paginator = TusharePaginator(
+
+        self.executor = TushareExecutor(
             api_func=self.pro.etf_basic,
             limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        # date 语义优先
-        if start_date or end_date:
-            raise ValueError("opt_basic does not support date range")
-
-        filters = {
-            "ts_code": ts_code or "",
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(self, *, code, exchange=None, date=None, **_):
+        return {
+            "ts_code": code or "",
             "exchange": exchange or "",
             "list_date": date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+        self,
+        *,
+        code=None,
+        code_list=None,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+    ):
+        if start_date or end_date:
+            raise ValueError("etf_basic does not support date range")
 
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            exchange=exchange,
+            date=date,
+            fields=self.FIELDS,
+        )
 
 class TushareEtfFundDaily(BaseDataSource, BaseTushareSource):
     MAX_LIMIT = 2000
@@ -288,42 +385,69 @@ class TushareEtfFundDaily(BaseDataSource, BaseTushareSource):
         "change",
         "pct_chg",
         "vol",
-        "amount"
+        "amount",
     ]
 
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
-        )
-        self.paginator = TusharePaginator(
-            api_func=self.pro.fund_daily,
-            limit=self.MAX_LIMIT,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        # date 语义优先
+        self.executor = TushareExecutor(
+            api_func=self.pro.fund_daily,
+            limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
+        )
+
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(
+        self,
+        *,
+        code,
+        date=None,
+        start_date=None,
+        end_date=None,
+        **_,
+    ):
         if date is not None:
             start_date = date
             end_date = date
 
-        filters = {
-            "ts_code": ts_code or "",
-            "exchange": exchange or "",
+        return {
+            "ts_code": code or "",
             "start_date": start_date or "",
             "end_date": end_date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+        self,
+        *,
+        code=None,
+        code_list=None,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+    ):
+        if exchange:
+            raise ValueError("fund_daily does not support exchange")
 
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+            fields=self.FIELDS,
+        )
 
 class TushareEtfFundAdj(BaseDataSource, BaseTushareSource):
     MAX_LIMIT = 2000
@@ -331,42 +455,70 @@ class TushareEtfFundAdj(BaseDataSource, BaseTushareSource):
     FIELDS = [
         "ts_code",
         "trade_date",
-        "adj_factor"
+        "adj_factor",
     ]
 
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
-        )
-        self.paginator = TusharePaginator(
-            api_func=self.pro.fund_adj,
-            limit=self.MAX_LIMIT,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        if exchange:
-            raise ValueError("TushareEtfFundDaily does not support exchange")
-        # date 语义优先
+        self.executor = TushareExecutor(
+            api_func=self.pro.fund_adj,
+            limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
+        )
+
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(
+        self,
+        *,
+        code,
+        date=None,
+        start_date=None,
+        end_date=None,
+        **_,
+    ):
         if date is not None:
             start_date = date
             end_date = date
 
-        filters = {
-            "ts_code": ts_code or "",
+        return {
+            "ts_code": code or "",
             "start_date": start_date or "",
             "end_date": end_date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+        self,
+        *,
+        code=None,
+        code_list=None,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+    ):
+        if exchange:
+            raise ValueError("fund_adj does not support exchange")
+
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+            fields=self.FIELDS,
+        )
+
 
 class TushareFutBasicSource(BaseDataSource, BaseTushareSource):
     MAX_LIMIT = 10000
@@ -386,41 +538,56 @@ class TushareFutBasicSource(BaseDataSource, BaseTushareSource):
         "list_date",
         "delist_date",
         "d_month",
-        "last_ddate"
+        "last_ddate",
     ]
 
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
-        self.paginator = TusharePaginator(
+
+        self.executor = TushareExecutor(
             api_func=self.pro.fut_basic,
             limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        # date ????????????
-        if start_date or end_date:
-            raise ValueError("TushareFutBasicSource does not support date range")
-
-        filters = {
-            "ts_code": ts_code or "",
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(self, *, code, exchange=None, date=None, **_):
+        return {
+            "ts_code": code or "",
             "exchange": exchange or "",
             "list_date": date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+        self,
+        *,
+        code=None,
+        code_list=None,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+    ) -> pd.DataFrame:
+        if start_date or end_date:
+            raise ValueError("fut_basic does not support date range")
 
-
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            exchange=exchange,
+            date=date,
+            fields=self.FIELDS,
+        )
 class TushareFutDaily(BaseDataSource, BaseTushareSource):
     MAX_LIMIT = 2000
 
@@ -439,58 +606,86 @@ class TushareFutDaily(BaseDataSource, BaseTushareSource):
         "vol",
         "amount",
         "oi",
-        "oi_chg"
+        "oi_chg",
     ]
 
     def __init__(self, *, pro=None, token=None):
         BaseTushareSource.__init__(
             self,
-            token=TushareInfo.token,
-        )
-        self.paginator = TusharePaginator(
-            api_func=self.pro.fut_daily,
-            limit=self.MAX_LIMIT,
+            pro=pro,
+            token=token,
+            default_token=TushareInfo.token,
         )
 
-    def _fetch_impl(
-            self,
-            *,
-            ts_code,
-            exchange,
-            date,
-            start_date,
-            end_date,
-    ) -> pd.DataFrame:
-        # date ????????????
+        self.executor = TushareExecutor(
+            api_func=self.pro.fut_daily,
+            limit=self.MAX_LIMIT,
+            build_filters=self._build_filters,
+        )
+
+    # ===============================
+    # semantic → tushare mapping
+    # ===============================
+    def _build_filters(
+        self,
+        *,
+        code,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+        **_,
+    ):
+        # date 语义优先
         if date is not None:
             start_date = date
             end_date = date
 
-        filters = {
-            "ts_code": ts_code or "",
+        return {
+            "ts_code": code or "",
             "exchange": exchange or "",
             "start_date": start_date or "",
             "end_date": end_date or "",
         }
 
-        return self.paginator.fetch(filters=filters, fields=self.FIELDS)
+    # ===============================
+    # semantic enforcement
+    # ===============================
+    def _fetch_impl(
+        self,
+        *,
+        code=None,
+        code_list=None,
+        exchange=None,
+        date=None,
+        start_date=None,
+        end_date=None,
+    ) -> pd.DataFrame:
+        return self.executor.fetch(
+            code=code,
+            code_list=code_list,
+            exchange=exchange,
+            date=date,
+            start_date=start_date,
+            end_date=end_date,
+            fields=self.FIELDS,
+        )
 
 if __name__ == "__main__":
     from autotrade.coreutils.config import load_env
 
     load_env("d:/.env")
 
-    basic = TushareEtfFundAdj()
-    res = basic.fetch(ts_code='159238.SZ',exchange='a', start_date='20250104')
-
+    basic = TushareOptDailySource()
+    res = basic.fetch(code_list=['LH2603-C-11800.DCE', 'LH2603-C-11600.DCE'])
 
     import tushare as ts
 
     # token秘钥（把给咱们的token复制过来哈）
-    token = "f5d21f83664a2e928757d8ae18a8c0a1e58f28e72b0560b196bed1c91672"
+    token = "e6b4f77f5a97f0ba09588b802e69ea798441f7ed2adf1b418158ea7ad25b"
     pro = ts.pro_api(token)
     pro._DataApi__token = token  # 保证有这个代码，不然不可以获取
     pro._DataApi__http_url = 'https://jiaoch.site'  # 保证有这个代码，不然不可以获取
     # 测试接口(换成自己的接口）
-    res = pro.daily(ts_code='000001.SZ', start_date='20180701', end_date='20180718')
+    res = pro.opt_basic(ts_code='LH2603-C-11800.DCE')
     print(res)

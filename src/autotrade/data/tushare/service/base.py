@@ -18,7 +18,8 @@ class BaseService(ABC):
             *,
             mode: FetchMode = FetchMode.DB_THEN_SOURCE,
             persist: bool = True,
-            ts_code=None,
+            code=None,
+            code_list=None,
             exchange=None,
             date=None,
             start_date=None,
@@ -26,7 +27,8 @@ class BaseService(ABC):
     ) -> FetchResult:
 
         params = dict(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             exchange=exchange,
             date=date,
             start_date=start_date,
@@ -46,13 +48,40 @@ class BaseService(ABC):
 
             # DB_THEN_SOURCE
             df_db = self._query_db(**params)
-            if not df_db.empty:
-                return FetchResult(FetchStatus.SUCCESS, data=df_db)
+            # db 为空直接查询
+            if df_db.empty:
+                df_src = self._fetch_source(**params)
+                if persist:
+                    self._persist(df_src)
+                return FetchResult(FetchStatus.SUCCESS, data=df_src)
 
-            df_src = self._fetch_source(**params)
-            if persist:
-                self._persist(df_src)
-            return FetchResult(FetchStatus.SUCCESS, data=df_src)
+            else:
+                # 如果不是用code_list查询又非空，直接返回
+                if code_list is None:
+                    return FetchResult(FetchStatus.SUCCESS, data=df_db)
+                else:
+                    # 如果是用code_list查询,结果非空,检查code是否缺失
+                    # code字段
+                    code_field = self.repo.CODE_FIELD
+                    # db获取的code_list
+                    db_code_list = set(df_db[code_field])
+                    query_code_list = set(code_list)
+                    missing_code_list = list(query_code_list-db_code_list)
+                    # code 有缺失,查询
+                    if len(missing_code_list) > 0:
+                        src_params = dict(
+                            code_list=missing_code_list,
+                            exchange=exchange,
+                            date=date,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+                        df_src = self._fetch_source(**src_params)
+                        if persist:
+                            self._persist(df_src)
+                        df_db = pd.concat([df_db, df_src])
+
+                    return FetchResult(FetchStatus.SUCCESS, data=df_db)
 
         except Exception as e:
             logger.error("service get failed", exc_info=e)
@@ -76,3 +105,4 @@ class BaseService(ABC):
         if not self.repo:
             raise NotImplementedError("Repository not set")
         self.repo.insert_ignore(df)
+

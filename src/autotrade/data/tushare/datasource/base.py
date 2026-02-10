@@ -2,12 +2,13 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 
+
 class BaseDataSource(ABC):
     """
     Base data source with unified query semantics.
 
     Supported query dimensions:
-    - ts_code
+    - code
     - exchange
     - date
     - start_date
@@ -15,13 +16,14 @@ class BaseDataSource(ABC):
     """
 
     def fetch(
-        self,
-        *,
-        ts_code: str | None = None,
-        exchange: str | None = None,
-        date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
+            self,
+            *,
+            code: str | None = None,
+            code_list: list[str] | None = None,
+            exchange: str | None = None,
+            date: str | None = None,
+            start_date: str | None = None,
+            end_date: str | None = None,
     ) -> pd.DataFrame:
         """
         Unified fetch entry.
@@ -30,7 +32,8 @@ class BaseDataSource(ABC):
         Actual mapping is implemented by subclasses.
         """
         return self._fetch_impl(
-            ts_code=ts_code,
+            code=code,
+            code_list=code_list,
             exchange=exchange,
             date=date,
             start_date=start_date,
@@ -39,13 +42,14 @@ class BaseDataSource(ABC):
 
     @abstractmethod
     def _fetch_impl(
-        self,
-        *,
-        ts_code: str | None,
-        exchange: str | None,
-        date: str | None,
-        start_date: str | None,
-        end_date: str | None,
+            self,
+            *,
+            code: str | None,
+            code_list: list[str] | None = None,
+            exchange: str | None,
+            date: str | None,
+            start_date: str | None,
+            end_date: str | None,
     ) -> pd.DataFrame:
         """
         Subclass should map unified query semantics
