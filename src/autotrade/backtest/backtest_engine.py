@@ -283,7 +283,7 @@ class BacktestEngine:
         self._push_bar_event(bar)
 
         # Step 3: 市价单当前bar收盘成交模式
-        if self.matched_interval == "CURRENT_BAR_CLOSE" and bar.interval == self.matched_interval:
+        if self.mkt_order_match_mode == "CURRENT_BAR_CLOSE" and bar.interval == self.matched_interval:
             self.gateway.fill_mkt_order(bar)
 
     def on_trade(self, trade: TradeData):

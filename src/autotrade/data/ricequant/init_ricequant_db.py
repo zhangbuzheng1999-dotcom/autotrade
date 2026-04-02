@@ -9,6 +9,12 @@ cursor = conn.cursor()
 # todo
 # 其他表还没有设置主键
 
+import rqdatac
+rqdatac.init()
+rqdatac.all_instruments(type='Future', date=None, market='cn')
+
+futures.get_contracts('IF', '20160801')
+
 def create_option_data():
     cursor.execute("CREATE DATABASE IF NOT EXISTS option_data")  # 创建基础数据库
     cursor.execute("use option_data ")
