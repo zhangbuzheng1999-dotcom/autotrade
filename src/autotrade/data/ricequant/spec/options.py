@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
 
@@ -35,6 +36,8 @@ class OptionInstrumentSpec(BaseRQSpec):
 
     RESOURCE_NAME = "option_instruments"
     RESOURCE_TYPE = "snapshot"
+    STORAGE_BACKEND = "mysql"
+    WRITE_MODE = "snapshot_upsert"
 
     DATABASE = "rq_option_data"
     TABLE = "option_instruments"
@@ -282,6 +285,8 @@ class OptionGreeksSpec(BaseRQSpec):
 
     RESOURCE_NAME = "option_greeks"
     RESOURCE_TYPE = "timeseries"
+    STORAGE_BACKEND = "clickhouse"
+    WRITE_MODE = "timeseries_append"
 
     DATABASE = "rq_option_data"
     TABLE = ""

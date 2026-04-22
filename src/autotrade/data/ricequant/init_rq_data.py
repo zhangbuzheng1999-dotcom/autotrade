@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
+from autotrade.coreutils.config import DatabaseInfo, load_env
+from autotrade.data.ricequant._clickhouse import ClickHouseHTTPClient
 
-import pymysql
 
-from autotrade.coreutils.config import DatabaseInfo
+def _import_pymysql():
+    try:
+        import pymysql
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "pymysql is required for RiceQuant database initialization. "
+            "Install it in the active environment, for example: pip install pymysql"
+        ) from exc
+    return pymysql
 
 # ============================================================
 # Constants
@@ -24,6 +34,8 @@ RQ_DATABASES = {
     "rq_index_data",
 }
 
+CLICKHOUSE_CLIENT = ClickHouseHTTPClient()
+
 
 # ============================================================
 # Base helpers
@@ -31,6 +43,7 @@ RQ_DATABASES = {
 
 @contextmanager
 def get_conn(database: str | None = None):
+    pymysql = _import_pymysql()
     conn = pymysql.connect(
         host=DatabaseInfo.host,
         port=DatabaseInfo.port,
@@ -52,7 +65,11 @@ def execute_sql(sql: str, database: str | None = None) -> None:
             cursor.execute(sql)
 
 
-def create_database_if_not_exists(database_name: str) -> None:
+def execute_clickhouse_sql(sql: str, database: str | None = None) -> None:
+    CLICKHOUSE_CLIENT.execute(sql, database=database)
+
+
+def create_mysql_database_if_not_exists(database_name: str) -> None:
     sql = f"""
     CREATE DATABASE IF NOT EXISTS `{database_name}`
     DEFAULT CHARACTER SET utf8mb4
@@ -60,9 +77,82 @@ def create_database_if_not_exists(database_name: str) -> None:
     execute_sql(sql)
 
 
+def create_clickhouse_database_if_not_exists(database_name: str) -> None:
+    execute_clickhouse_sql(f"CREATE DATABASE IF NOT EXISTS `{database_name}`")
+
+
 def create_rq_base_databases() -> None:
     for db in RQ_DATABASES:
-        create_database_if_not_exists(db)
+        create_mysql_database_if_not_exists(db)
+        create_clickhouse_database_if_not_exists(db)
+
+def build_year_range_partitions_sql(
+    column_name: str,
+    start_year: int = 2005,
+    end_year: int | None = None,
+) -> str:
+    """
+    生成 MySQL RANGE COLUMNS 年分区定义。
+    例如：
+        PARTITION BY RANGE COLUMNS(`date`) (
+            PARTITION p2005 VALUES LESS THAN ('2006-01-01'),
+            ...
+            PARTITION pmax VALUES LESS THAN (MAXVALUE)
+        )
+
+    说明：
+    - end_year 表示“最后一个显式年份分区”
+    - 超过 end_year 的数据进入 pmax
+    """
+    if end_year is None:
+        end_year = datetime.now().year + 3
+
+    parts = []
+    for year in range(start_year, end_year + 1):
+        less_than = f"{year + 1}-01-01"
+        parts.append(
+            f"PARTITION p{year} VALUES LESS THAN ('{less_than}')"
+        )
+
+    parts.append("PARTITION pmax VALUES LESS THAN (MAXVALUE)")
+
+    return (
+        f"PARTITION BY RANGE COLUMNS(`{column_name}`) (\n        "
+        + ",\n        ".join(parts)
+        + "\n    )"
+    )
+
+
+def build_month_range_partitions_sql(
+    column_name: str,
+    start_year: int = 2005,
+    start_month: int = 1,
+    end_year: int | None = None,
+    end_month: int = 12,
+) -> str:
+    if end_year is None:
+        end_year = datetime.now().year + 2
+
+    parts = []
+    year = start_year
+    month = start_month
+
+    while (year, month) <= (end_year, end_month):
+        next_year = year + (1 if month == 12 else 0)
+        next_month = 1 if month == 12 else month + 1
+        less_than = f"{next_year:04d}-{next_month:02d}-01"
+        parts.append(
+            f"PARTITION p{year:04d}{month:02d} VALUES LESS THAN ('{less_than}')"
+        )
+        year, month = next_year, next_month
+
+    parts.append("PARTITION pmax VALUES LESS THAN (MAXVALUE)")
+
+    return (
+        f"PARTITION BY RANGE COLUMNS(`{column_name}`) (\n        "
+        + ",\n        ".join(parts)
+        + "\n    )"
+    )
 
 
 # ============================================================
@@ -70,6 +160,8 @@ def create_rq_base_databases() -> None:
 # ============================================================
 
 def build_daily_price_table_sql(table_name: str) -> str:
+    partition_sql = build_month_range_partitions_sql("date")
+
     return f"""
     CREATE TABLE IF NOT EXISTS `{table_name}` (
         `order_book_id` VARCHAR(64) NOT NULL,
@@ -105,11 +197,14 @@ def build_daily_price_table_sql(table_name: str) -> str:
         KEY `idx_type_date` (`type`, `date`),
         KEY `idx_frequency_date` (`frequency`, `date`),
         KEY `idx_market_date` (`market`, `date`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    {partition_sql};
     """
 
 
 def build_minute_price_table_sql(table_name: str) -> str:
+    partition_sql = build_month_range_partitions_sql("datetime")
+
     return f"""
     CREATE TABLE IF NOT EXISTS `{table_name}` (
         `order_book_id` VARCHAR(64) NOT NULL,
@@ -148,9 +243,9 @@ def build_minute_price_table_sql(table_name: str) -> str:
         KEY `idx_frequency_datetime` (`frequency`, `datetime`),
         KEY `idx_trading_date` (`trading_date`),
         KEY `idx_market_datetime` (`market`, `datetime`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    {partition_sql};
     """
-
 
 def create_price_tables_for_database(database_name: str, table_prefix: str) -> None:
     for freq in DAILY_FREQUENCIES:
@@ -160,6 +255,90 @@ def create_price_tables_for_database(database_name: str, table_prefix: str) -> N
     for freq in MINUTE_FREQUENCIES:
         table_name = f"{table_prefix}_{freq}"
         execute_sql(build_minute_price_table_sql(table_name), database=database_name)
+
+
+def build_clickhouse_daily_price_table_sql(table_name: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{table_name}` (
+        `order_book_id` String,
+        `date` Date,
+        `type` String,
+        `frequency` String,
+        `market` String,
+        `open` Nullable(Float64),
+        `close` Nullable(Float64),
+        `high` Nullable(Float64),
+        `low` Nullable(Float64),
+        `limit_up` Nullable(Float64),
+        `limit_down` Nullable(Float64),
+        `total_turnover` Nullable(Float64),
+        `volume` Nullable(Float64),
+        `num_trades` Nullable(Float64),
+        `prev_close` Nullable(Float64),
+        `settlement` Nullable(Float64),
+        `prev_settlement` Nullable(Float64),
+        `open_interest` Nullable(Float64),
+        `dominant_id` Nullable(String),
+        `strike_price` Nullable(Float64),
+        `contract_multiplier` Nullable(Float64),
+        `iopv` Nullable(Float64),
+        `day_session_open` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`date`)
+    ORDER BY (`date`, `order_book_id`)
+    """
+
+def build_clickhouse_minute_price_table_sql(table_name: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{table_name}` (
+        `order_book_id` String,
+        `datetime` DateTime,
+        `type` String,
+        `frequency` String,
+        `market` String,
+        `trading_date` Nullable(Date),
+        `open` Nullable(Float64),
+        `close` Nullable(Float64),
+        `high` Nullable(Float64),
+        `low` Nullable(Float64),
+        `limit_up` Nullable(Float64),
+        `limit_down` Nullable(Float64),
+        `total_turnover` Nullable(Float64),
+        `volume` Nullable(Float64),
+        `num_trades` Nullable(Float64),
+        `prev_close` Nullable(Float64),
+        `settlement` Nullable(Float64),
+        `prev_settlement` Nullable(Float64),
+        `open_interest` Nullable(Float64),
+        `dominant_id` Nullable(String),
+        `strike_price` Nullable(Float64),
+        `contract_multiplier` Nullable(Float64),
+        `iopv` Nullable(Float64),
+        `day_session_open` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`datetime`)
+    ORDER BY (`datetime`, `order_book_id`)
+    """
+
+
+def create_clickhouse_price_tables_for_database(database_name: str, table_prefix: str) -> None:
+    for freq in DAILY_FREQUENCIES:
+        table_name = f"{table_prefix}_{freq}"
+        execute_clickhouse_sql(
+            build_clickhouse_daily_price_table_sql(table_name),
+            database=database_name,
+        )
+
+    for freq in MINUTE_FREQUENCIES:
+        table_name = f"{table_prefix}_{freq}"
+        execute_clickhouse_sql(
+            build_clickhouse_minute_price_table_sql(table_name),
+            database=database_name,
+        )
 
 
 # ============================================================
@@ -232,15 +411,16 @@ def create_rq_futures_data(database_name: str = "rq_future_data") -> None:
     - 通用价格表 future_price_*
     - futures 专属表 future_instruments
     """
-    create_database_if_not_exists(database_name)
+    create_mysql_database_if_not_exists(database_name)
+    create_clickhouse_database_if_not_exists(database_name)
 
-    # 通用可复用 price 表
-    create_price_tables_for_database(
+    # 高频 / 时序 price 表走 ClickHouse
+    create_clickhouse_price_tables_for_database(
         database_name=database_name,
         table_prefix="future_price",
     )
 
-    # futures 专属表
+    # futures 元数据表走 MySQL
     create_future_specific_tables(database_name=database_name)
 
 
@@ -285,68 +465,57 @@ def build_option_instruments_table_sql(table_name: str = "option_instruments") -
 def build_option_greeks_daily_table_sql(table_name: str = "option_greeks_1d") -> str:
     return f"""
     CREATE TABLE IF NOT EXISTS `{table_name}` (
-        `order_book_id` VARCHAR(32) NOT NULL,
-        `trading_date` DATE NOT NULL,
-        `model` VARCHAR(32) NOT NULL DEFAULT 'implied_forward',
-        `price_type` VARCHAR(16) NOT NULL DEFAULT 'close',
-        `frequency` VARCHAR(8) NOT NULL DEFAULT '1d',
-        `market` VARCHAR(8) NOT NULL DEFAULT 'cn',
-
-        `iv` DOUBLE NULL,
-        `delta` DOUBLE NULL,
-        `gamma` DOUBLE NULL,
-        `vega` DOUBLE NULL,
-        `theta` DOUBLE NULL,
-        `rho` DOUBLE NULL,
-
-        `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-
-        PRIMARY KEY (`order_book_id`, `trading_date`, `model`, `price_type`),
-        KEY `idx_trading_date` (`trading_date`),
-        KEY `idx_model_trading_date` (`model`, `trading_date`),
-        KEY `idx_price_type_trading_date` (`price_type`, `trading_date`),
-        KEY `idx_market_trading_date` (`market`, `trading_date`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='期权Greek日表';
+        `order_book_id` String,
+        `trading_date` Date,
+        `model` String,
+        `price_type` String,
+        `frequency` String,
+        `market` String,
+        `iv` Nullable(Float64),
+        `delta` Nullable(Float64),
+        `gamma` Nullable(Float64),
+        `vega` Nullable(Float64),
+        `theta` Nullable(Float64),
+        `rho` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`trading_date`)
+    ORDER BY (`trading_date`, `order_book_id`)
     """
 
 
 def build_option_greeks_minute_table_sql(table_name: str = "option_greeks_1m") -> str:
     return f"""
     CREATE TABLE IF NOT EXISTS `{table_name}` (
-        `order_book_id` VARCHAR(32) NOT NULL,
-        `datetime` DATETIME NOT NULL,
-        `model` VARCHAR(32) NOT NULL DEFAULT 'implied_forward',
-        `price_type` VARCHAR(16) NOT NULL DEFAULT 'close',
-        `frequency` VARCHAR(8) NOT NULL DEFAULT '1m',
-        `market` VARCHAR(8) NOT NULL DEFAULT 'cn',
-
-        `iv` DOUBLE NULL,
-        `delta` DOUBLE NULL,
-        `gamma` DOUBLE NULL,
-        `vega` DOUBLE NULL,
-        `theta` DOUBLE NULL,
-        `rho` DOUBLE NULL,
-
-        `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-
-        PRIMARY KEY (`order_book_id`, `datetime`, `model`, `price_type`),
-        KEY `idx_datetime` (`datetime`),
-        KEY `idx_model_datetime` (`model`, `datetime`),
-        KEY `idx_price_type_datetime` (`price_type`, `datetime`),
-        KEY `idx_market_datetime` (`market`, `datetime`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='期权Greek分钟表';
+        `order_book_id` String,
+        `datetime` DateTime,
+        `model` String,
+        `price_type` String,
+        `frequency` String,
+        `market` String,
+        `iv` Nullable(Float64),
+        `delta` Nullable(Float64),
+        `gamma` Nullable(Float64),
+        `vega` Nullable(Float64),
+        `theta` Nullable(Float64),
+        `rho` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`datetime`)
+    ORDER BY (`datetime`, `order_book_id`)
     """
 
+
+
 def create_option_greeks_tables(database_name: str = "rq_option_data") -> None:
-    execute_sql(build_option_greeks_daily_table_sql(), database=database_name)
-    execute_sql(build_option_greeks_minute_table_sql(), database=database_name)
+    execute_clickhouse_sql(build_option_greeks_daily_table_sql(), database=database_name)
+    execute_clickhouse_sql(build_option_greeks_minute_table_sql(), database=database_name)
 
 
 def create_option_specific_tables(database_name: str = "rq_option_data") -> None:
     execute_sql(build_option_instruments_table_sql(), database=database_name)
-    create_option_greeks_tables(database_name=database_name)
 
 
 def create_rq_options_data(database_name: str = "rq_option_data") -> None:
@@ -355,15 +524,18 @@ def create_rq_options_data(database_name: str = "rq_option_data") -> None:
     - 通用价格表 option_price_*
     - options 专属表 option_instruments
     """
-    create_database_if_not_exists(database_name)
+    create_mysql_database_if_not_exists(database_name)
+    create_clickhouse_database_if_not_exists(database_name)
 
-    # 通用 price 表
-    create_price_tables_for_database(
+    # 高频 / 时序 price 表走 ClickHouse
+    create_clickhouse_price_tables_for_database(
         database_name=database_name,
         table_prefix="option_price",
     )
 
-    # option 专属表
+    create_option_greeks_tables(database_name=database_name)
+
+    # option 元数据表走 MySQL
     create_option_specific_tables(database_name=database_name)
 
 
@@ -431,15 +603,16 @@ def create_rq_index_data(database_name: str = "rq_index_data") -> None:
     指数价格目前复用 rq_stock_data 下的 stock_price_*，
     通过 type='INDX' 区分。
     """
-    create_database_if_not_exists(database_name)
+    create_mysql_database_if_not_exists(database_name)
+    create_clickhouse_database_if_not_exists(database_name)
 
-    # 通用可复用 price 表（股票库共用）
-    create_price_tables_for_database(
+    # 时序 price 表走 ClickHouse
+    create_clickhouse_price_tables_for_database(
         database_name=database_name,
-        table_prefix="stock_price",
+        table_prefix="index_price",
     )
 
-    # index 专属表
+    # index 元数据表走 MySQL
     create_index_specific_tables(database_name=database_name)
 
 
@@ -498,9 +671,10 @@ def create_cn_stock_specific_tables(database_name: str = "rq_stock_data") -> Non
 
 
 def create_rq_cn_stock_data(database_name: str = "rq_stock_data") -> None:
-    create_database_if_not_exists(database_name)
+    create_mysql_database_if_not_exists(database_name)
+    create_clickhouse_database_if_not_exists(database_name)
 
-    create_price_tables_for_database(
+    create_clickhouse_price_tables_for_database(
         database_name=database_name,
         table_prefix="stock_price",
     )
@@ -563,33 +737,109 @@ def create_etf_specific_tables(database_name: str = "rq_etf_data") -> None:
 
 
 def create_rq_etf_data(database_name: str = "rq_etf_data") -> None:
-    create_database_if_not_exists(database_name)
+    create_mysql_database_if_not_exists(database_name)
+    create_clickhouse_database_if_not_exists(database_name)
 
-    create_price_tables_for_database(
+    create_clickhouse_price_tables_for_database(
         database_name=database_name,
         table_prefix="etf_price",
     )
 
     create_etf_specific_tables(database_name=database_name)
 
+def build_trading_dates_table_sql(table_name: str = "trading_dates") -> str:
+    partition_sql = build_year_range_partitions_sql("trading_date")
 
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{table_name}` (
+        `trading_date` DATE NOT NULL COMMENT '交易日',
+        `market` VARCHAR(8) NOT NULL DEFAULT 'cn' COMMENT '市场',
+
+        `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        PRIMARY KEY (`market`, `trading_date`),
+        KEY `idx_trading_date` (`trading_date`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    {partition_sql};
+    """
+def create_rq_data_common_tables(database_name: str = "rq_data") -> None:
+    create_mysql_database_if_not_exists(database_name)
+    execute_sql(build_trading_dates_table_sql(), database=database_name)
 # ============================================================
 # Global init
 # ============================================================
 
 def init_rq_db() -> None:
     create_rq_base_databases()
+    create_rq_data_common_tables()
     create_rq_futures_data()
     create_rq_options_data()
     create_rq_index_data()
     create_rq_cn_stock_data()
     create_rq_etf_data()
 
+def rebuild_all_clickhouse_tables() -> None:
+    """
+    删除并重建所有 ClickHouse 表。
+
+    注意：
+    1. 会删除原有 ClickHouse 表及其中全部数据
+    2. 不影响 MySQL 的 instruments / metadata 表
+    3. 依赖前面的 ClickHouse 建表函数已经改成 ReplacingMergeTree(ingest_time)
+    """
+
+    # 确保数据库存在
+    for db in RQ_DATABASES:
+        create_clickhouse_database_if_not_exists(db)
+
+    # 需要重建的 ClickHouse price 表
+    table_groups = [
+        ("rq_future_data", "future_price"),
+        ("rq_option_data", "option_price"),
+        ("rq_index_data", "index_price"),
+        ("rq_stock_data", "stock_price"),
+        ("rq_etf_data", "etf_price"),
+    ]
+
+    # 先删除所有 price 表
+    for database_name, table_prefix in table_groups:
+        for freq in DAILY_FREQUENCIES:
+            table_name = f"{table_prefix}_{freq}"
+            execute_clickhouse_sql(
+                f"DROP TABLE IF EXISTS `{table_name}`",
+                database=database_name,
+            )
+
+        for freq in MINUTE_FREQUENCIES:
+            table_name = f"{table_prefix}_{freq}"
+            execute_clickhouse_sql(
+                f"DROP TABLE IF EXISTS `{table_name}`",
+                database=database_name,
+            )
+
+    # 删除 option greeks 表
+    execute_clickhouse_sql(
+        "DROP TABLE IF EXISTS `option_greeks_1d`",
+        database="rq_option_data",
+    )
+    execute_clickhouse_sql(
+        "DROP TABLE IF EXISTS `option_greeks_1m`",
+        database="rq_option_data",
+    )
+
+    # 重建所有 price 表
+    for database_name, table_prefix in table_groups:
+        create_clickhouse_price_tables_for_database(
+            database_name=database_name,
+            table_prefix=table_prefix,
+        )
+
+    # 重建 option greeks 表
+    create_option_greeks_tables(database_name="rq_option_data")
 
 if __name__ == "__main__":
-    from autotrade.coreutils.config import load_env
-
-    load_env("d:/.env")
+    load_env()
 
     init_rq_db()
-    print("RiceQuant futures database initialized successfully.")
+    print("RiceQuant MySQL metadata and ClickHouse timeseries databases initialized successfully.")

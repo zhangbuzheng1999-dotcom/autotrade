@@ -4,6 +4,7 @@ from typing import Any
 
 import pandas as pd
 
+
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
 
@@ -33,6 +34,8 @@ class ETFInstrumentSpec(BaseRQSpec):
 
     RESOURCE_NAME = "etf_instruments"
     RESOURCE_TYPE = "snapshot"
+    STORAGE_BACKEND = "mysql"
+    WRITE_MODE = "snapshot_upsert"
 
     DATABASE = "rq_etf_data"
     TABLE = "etf_instruments"

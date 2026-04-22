@@ -1,10 +1,47 @@
 from pathlib import Path
-from dotenv import load_dotenv, find_dotenv
 import os
 import warnings
 
+try:
+    from dotenv import load_dotenv as _dotenv_load_dotenv, find_dotenv as _dotenv_find_dotenv
+except ModuleNotFoundError:
+    _dotenv_load_dotenv = None
+    _dotenv_find_dotenv = None
+
 # ===================== 内部状态 =====================
 _ENV_LOADED = False
+
+
+def _load_env_file(env_file: Path, *, override: bool) -> bool:
+    if _dotenv_load_dotenv is not None:
+        _dotenv_load_dotenv(env_file, override=override)
+        return True
+
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+
+        if override or key not in os.environ:
+            os.environ[key] = value
+
+    return True
+
+
+def _find_project_env() -> str:
+    if _dotenv_find_dotenv is not None:
+        return _dotenv_find_dotenv(usecwd=True)
+
+    for root in [Path.cwd(), *Path.cwd().parents]:
+        env_file = root / ".env"
+        if env_file.exists():
+            return str(env_file)
+
+    return ""
 
 
 def load_env(env_path=None):
@@ -30,14 +67,14 @@ def load_env(env_path=None):
         env_file = Path(env_path).expanduser().resolve()
         if not env_file.exists():
             raise FileNotFoundError(f".env not found: {env_file}")
-        load_dotenv(env_file, override=True)
+        _load_env_file(env_file, override=True)
         _ENV_LOADED = True
         return
 
     # 2) Auto find .env from current working directory upward
-    env_file = find_dotenv(usecwd=True)
+    env_file = _find_project_env()
     if env_file:
-        load_dotenv(env_file, override=False)
+        _load_env_file(Path(env_file), override=False)
         _ENV_LOADED = True
         return
 
@@ -46,7 +83,7 @@ def load_env(env_path=None):
     if global_env:
         env_file = Path(global_env).expanduser().resolve()
         if env_file.exists():
-            load_dotenv(env_file, override=False)
+            _load_env_file(env_file, override=False)
             _ENV_LOADED = True
             return
 
@@ -90,6 +127,35 @@ class _DatabaseInfoProxy:
             return os.getenv("DB_USER", "root")
         if name == "password":
             return os.getenv("DB_PASSWORD", "")
+
+        raise AttributeError(name)
+
+
+class _ClickHouseInfoProxy:
+    """
+    Dynamic proxy for ClickHouse config.
+    Always reflects latest environment variables.
+    """
+
+    def __getattr__(self, name: str):
+        load_env()
+
+        mapping = {
+            "host": ("CLICKHOUSE_HOST", "127.0.0.1"),
+            "http_port": ("CLICKHOUSE_HTTP_PORT", 8123),
+            "tcp_port": ("CLICKHOUSE_TCP_PORT", 9000),
+            "user": ("CLICKHOUSE_USER", "default"),
+            "password": ("CLICKHOUSE_PASSWORD", ""),
+            "database": ("CLICKHOUSE_DATABASE", "default"),
+        }
+
+        if name in {"http_port", "tcp_port"}:
+            env_key, default = mapping[name]
+            return _get_int_env(env_key, default)
+
+        if name in mapping:
+            env_key, default = mapping[name]
+            return os.getenv(env_key, default)
 
         raise AttributeError(name)
 
@@ -164,6 +230,7 @@ class _TushareProxy:
 
 # ===================== 对外稳定 API（兼容旧代码） =====================
 DatabaseInfo = _DatabaseInfoProxy()
+ClickHouseInfo = _ClickHouseInfoProxy()
 serverjiang = _ServerJiangProxy()
 LinuxServer = _LinuxServerProxy()
 FutuInfo = _FutuInfoProxy()
@@ -172,6 +239,7 @@ TushareInfo = _TushareProxy()
 __all__ = [
     "load_env",
     "DatabaseInfo",
+    "ClickHouseInfo",
     "serverjiang",
     "LinuxServer",
     "FutuInfo",

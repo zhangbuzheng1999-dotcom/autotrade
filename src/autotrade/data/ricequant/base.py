@@ -15,9 +15,22 @@ from decimal import Decimal
 
 import numpy as np
 import pandas as pd
-import pymysql
+
 
 from autotrade.coreutils.config import DatabaseInfo
+
+from autotrade.data.ricequant._clickhouse import ClickHouseClient
+
+
+def _import_pymysql():
+    try:
+        import pymysql
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "pymysql is required for RiceQuant repository/database operations. "
+            "Install it in the active environment, for example: pip install pymysql"
+        ) from exc
+    return pymysql
 
 
 # ============================================================
@@ -123,6 +136,8 @@ class BaseRQSpec(ABC):
     TABLE: str = ""
 
     RESOURCE_TYPE: str = "snapshot"   # snapshot / timeseries
+    STORAGE_BACKEND: str = "mysql"    # mysql / clickhouse
+    WRITE_MODE: str = ""              # snapshot_upsert / timeseries_append
 
     PRIMARY_KEYS: list[str] = []
     COLUMNS: list[str] = []
@@ -208,6 +223,16 @@ class BaseRQSpec(ABC):
         if not self.TABLE:
             raise ValueError(f"{self.RESOURCE_NAME} TABLE is not configured")
         return self.TABLE
+
+    def resolve_storage_backend(self, filters: dict[str, Any]) -> str:
+        return self.STORAGE_BACKEND
+
+    def resolve_write_mode(self, filters: dict[str, Any]) -> str:
+        if self.WRITE_MODE:
+            return self.WRITE_MODE
+        if self.RESOURCE_TYPE == "snapshot":
+            return "snapshot_upsert"
+        return "timeseries_append"
 
     # --------------------------------------------------------
     # db filter specs
@@ -372,6 +397,7 @@ class BaseRQRepository:
         if not database:
             raise ValueError("database is required")
 
+        pymysql = _import_pymysql()
         conn = pymysql.connect(
             **self._base_conn_args,
             database=database,
@@ -590,6 +616,206 @@ class BaseRQRepository:
         return f"`{col}`"
 
 
+class BaseClickHouseRepository:
+    """
+    Generic ClickHouse repository driven by spec.
+    """
+
+    CHUNK_SIZE = 5000
+
+    def __init__(self, spec: BaseRQSpec):
+        self.spec = spec
+        self.client = ClickHouseClient()
+
+    def query(self, **filters) -> pd.DataFrame:
+        filters = {k: v for k, v in filters.items() if v is not None}
+        filters = self.spec.normalize_query_filters(filters)
+        filters = self.spec.fill_default_filters(filters)
+        self.spec.validate_filters(filters, mode=FetchMode.DB_ONLY)
+
+        chunk_field = self._find_chunkable_in_filter(filters)
+
+        if chunk_field is None:
+            return self._query_once(filters)
+
+        all_parts = []
+        values = list(filters[chunk_field])
+
+        for batch in chunked(values, self.CHUNK_SIZE):
+            batch_filters = dict(filters)
+            batch_filters[chunk_field] = batch
+            df_part = self._query_once(batch_filters)
+            if df_part is not None and not df_part.empty:
+                all_parts.append(df_part)
+
+        if not all_parts:
+            return pd.DataFrame()
+
+        return pd.concat(all_parts, ignore_index=True)
+
+    def _query_once(self, filters: dict[str, Any]) -> pd.DataFrame:
+        database = self.spec.resolve_database(filters)
+        table = self.spec.resolve_table(filters)
+        db_filter_specs = self.spec.resolve_db_filter_specs(filters)
+        where_sql = self._build_where(filters, db_filter_specs)
+
+        sql = f"SELECT * FROM `{database}`.`{table}` FINAL {where_sql}"
+        return self.client.query_df(sql, database=database)
+
+    def _find_chunkable_in_filter(self, filters: dict[str, Any]) -> str | None:
+        db_filter_specs = self.spec.resolve_db_filter_specs(filters)
+
+        for logical_field, value in filters.items():
+            if logical_field not in db_filter_specs:
+                continue
+
+            rule = db_filter_specs[logical_field]
+            if rule.get("op") != "in":
+                continue
+
+            if isinstance(value, str):
+                continue
+
+            if isinstance(value, (list, tuple, set)) and len(value) > self.CHUNK_SIZE:
+                return logical_field
+
+        return None
+
+    def insert_dataframe(self, df: pd.DataFrame, **filters) -> None:
+        if df is None or df.empty:
+            return
+
+        filters = {k: v for k, v in filters.items() if v is not None}
+        filters = self.spec.normalize_query_filters(filters)
+        filters = self.spec.fill_default_filters(filters)
+
+        database = self.spec.resolve_database(filters)
+        table = self.spec.resolve_table(filters)
+        df = self._align_columns(df)
+        self.client.insert_dataframe(database=database, table=table, df=df)
+
+    def _align_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.spec.COLUMNS:
+            return df.copy()
+
+        result = df.copy()
+        for col in self.spec.COLUMNS:
+            if col not in result.columns:
+                result[col] = None
+
+        return result[self.spec.COLUMNS]
+
+    def _build_where(
+        self,
+        filters: dict[str, Any],
+        db_filter_specs: dict[str, dict[str, Any]],
+    ) -> str:
+        clauses = []
+
+        for logical_field, value in filters.items():
+            if value is None or logical_field not in db_filter_specs:
+                continue
+
+            rule = db_filter_specs[logical_field]
+            clause = self._compile_filter_clause(rule["column"], rule["op"], value)
+            if clause:
+                clauses.append(clause)
+
+        if not clauses:
+            return ""
+
+        return "WHERE " + " AND ".join(clauses)
+
+    def _compile_filter_clause(self, column: str, op: str, value: Any) -> str:
+        col = f"`{column}`"
+
+        if op == "eq":
+            return f"{col} = {self._format_value(value)}"
+        if op == "in":
+            values = value if isinstance(value, (list, tuple, set)) else [value]
+            values = list(values)
+            if not values:
+                return "0"
+            return f"{col} IN ({', '.join(self._format_value(v) for v in values)})"
+        if op == "gte":
+            return f"{col} >= {self._format_value(value)}"
+        if op == "lte":
+            return f"{col} <= {self._format_value(value)}"
+        if op == "gt":
+            return f"{col} > {self._format_value(value)}"
+        if op == "lt":
+            return f"{col} < {self._format_value(value)}"
+
+        raise ValueError(f"unsupported operator={op}")
+
+    @staticmethod
+    def _format_value(value: Any) -> str:
+        if isinstance(value, pd.Timestamp):
+            value = value.to_pydatetime()
+        elif isinstance(value, np.datetime64):
+            value = pd.to_datetime(value).to_pydatetime()
+
+        if isinstance(value, datetime):
+            return f"'{value.strftime('%Y-%m-%d %H:%M:%S')}'"
+        if isinstance(value, date):
+            return f"'{value.isoformat()}'"
+        if isinstance(value, str):
+            escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+            return f"'{escaped}'"
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return str(value)
+        if value is None:
+            return "NULL"
+
+        escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
+
+class BackendRoutingRepository:
+    def __init__(
+        self,
+        spec: BaseRQSpec,
+        *,
+        mysql_repo_cls: type[BaseRQRepository] | None = None,
+        clickhouse_repo_cls: type[BaseClickHouseRepository] | None = None,
+    ):
+        self.spec = spec
+        self._mysql_repo = mysql_repo_cls(spec) if mysql_repo_cls is not None else None
+        self._clickhouse_repo = (
+            clickhouse_repo_cls(spec) if clickhouse_repo_cls is not None else None
+        )
+
+    def _select_repo(self, filters: dict[str, Any]):
+        backend = self.spec.resolve_storage_backend(filters)
+        if backend == "mysql":
+            if self._mysql_repo is None:
+                raise ValueError(f"{self.spec.RESOURCE_NAME} mysql repository is not configured")
+            return self._mysql_repo
+        if backend == "clickhouse":
+            if self._clickhouse_repo is None:
+                raise ValueError(
+                    f"{self.spec.RESOURCE_NAME} clickhouse repository is not configured"
+                )
+            return self._clickhouse_repo
+        raise ValueError(f"{self.spec.RESOURCE_NAME} unsupported storage backend={backend}")
+
+    def query(self, **filters) -> pd.DataFrame:
+        return self._select_repo(filters).query(**filters)
+
+    def insert_ignore(self, df: pd.DataFrame, **filters) -> None:
+        return self._select_repo(filters).insert_ignore(df, **filters)
+
+    def upsert(self, df: pd.DataFrame, **filters) -> None:
+        return self._select_repo(filters).upsert(df, **filters)
+
+    def insert_dataframe(self, df: pd.DataFrame, **filters) -> None:
+        repo = self._select_repo(filters)
+        if not hasattr(repo, "insert_dataframe"):
+            raise ValueError(f"{self.spec.RESOURCE_NAME} repository does not support insert_dataframe")
+        return repo.insert_dataframe(df, **filters)
+
+
 # ============================================================
 # DataSource
 # ============================================================
@@ -698,7 +924,22 @@ class BaseRQService:
         if df is None or df.empty:
             return
 
-        if self.spec.RESOURCE_TYPE == "snapshot":
+        storage_backend = self.spec.resolve_storage_backend(filters)
+        write_mode = self.spec.resolve_write_mode(filters)
+
+        if storage_backend == "clickhouse":
+            self.repo.insert_dataframe(df, **filters)
+            return
+
+        if write_mode == "snapshot_upsert":
             self.repo.upsert(df, **filters)
-        else:
+            return
+
+        if write_mode == "timeseries_append":
             self.repo.insert_ignore(df, **filters)
+            return
+
+        raise ValueError(
+            f"{self.spec.RESOURCE_NAME} unsupported write mode={write_mode} "
+            f"for backend={storage_backend}"
+        )

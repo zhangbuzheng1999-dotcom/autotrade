@@ -33,6 +33,8 @@ class CNStockInstrumentSpec(BaseRQSpec):
 
     RESOURCE_NAME = "cn_stock_instruments"
     RESOURCE_TYPE = "snapshot"
+    STORAGE_BACKEND = "mysql"
+    WRITE_MODE = "snapshot_upsert"
 
     DATABASE = "rq_stock_data"
     TABLE = "cn_stock_instruments"

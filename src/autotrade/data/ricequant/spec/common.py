@@ -7,6 +7,7 @@ import pandas as pd
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
 
+
 class PriceSpec(BaseRQSpec):
     """
     RiceQuant get_price spec
@@ -23,6 +24,8 @@ class PriceSpec(BaseRQSpec):
 
     RESOURCE_NAME = "price"
     RESOURCE_TYPE = "timeseries"
+    STORAGE_BACKEND = "clickhouse"
+    WRITE_MODE = "timeseries_append"
 
     DATABASE = ""
     TABLE = ""
@@ -228,7 +231,11 @@ class PriceSpec(BaseRQSpec):
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         frequency = filters.get("frequency")
-        time_col = "datetime" if self.is_minute_frequency(frequency) else "date"
+        # DB-side start/end filters should preserve the same day-range semantics
+        # as the RiceQuant API. For minute bars, filtering on `datetime` with a
+        # date-only value like `2024-01-10` would collapse the upper bound to
+        # midnight and miss all intraday rows, so use `trading_date` instead.
+        time_col = "trading_date" if self.is_minute_frequency(frequency) else "date"
 
         return {
             "type": {"column": "type", "op": "eq"},
@@ -386,3 +393,169 @@ class PriceSpec(BaseRQSpec):
                 post_filters["end_date"] = pd.to_datetime(post_filters["end_date"]).date()
 
         return super().filter_df(result, post_filters)
+
+class TradingDatesSpec(BaseRQSpec):
+    """
+    get_trading_dates(start_date, end_date, market='cn')
+
+    SOURCE_ONLY / DB_THEN_SOURCE:
+        - 必须传 start_date
+        - 必须传 end_date
+
+    DB_ONLY:
+        - 也要求 start_date / end_date
+        - 支持 market 过滤
+    """
+
+    RESOURCE_NAME = "trading_dates"
+    RESOURCE_TYPE = "timeseries"
+    STORAGE_BACKEND = "mysql"
+    WRITE_MODE = "timeseries_append"
+
+    DATABASE = "rq_data"
+    TABLE = "trading_dates"
+
+    PRIMARY_KEYS = ["market", "trading_date"]
+
+    API_PARAMS = {
+        "start_date",
+        "end_date",
+        "market",
+    }
+
+    API_REQUIRED_FILTERS = {
+        "start_date",
+        "end_date",
+    }
+
+    DB_QUERY_FIELDS = {
+        "start_date",
+        "end_date",
+        "trading_date",
+        "market",
+    }
+
+    DB_REQUIRED_FILTERS = {
+        "start_date",
+        "end_date",
+    }
+
+    DEFAULT_FILTERS = {
+        "market": "cn",
+    }
+
+    DATE_FIELDS = {
+        "start_date",
+        "end_date",
+        "trading_date",
+    }
+
+    CODE_FIELDS = set()
+
+    COLUMNS = [
+        "trading_date",
+        "market",
+    ]
+
+    SUPPORTED_MARKETS = {"cn", "hk"}
+
+    def validate_filters(
+        self,
+        filters: dict[str, Any],
+        mode: FetchMode,
+    ) -> None:
+        super().validate_filters(filters, mode)
+
+        market = filters.get("market")
+        if market not in self.SUPPORTED_MARKETS:
+            raise ValueError(
+                f"{self.RESOURCE_NAME} unsupported market={market}, "
+                f"supported={sorted(self.SUPPORTED_MARKETS)}"
+            )
+
+        start_date = pd.to_datetime(filters.get("start_date")).date()
+        end_date = pd.to_datetime(filters.get("end_date")).date()
+        if start_date > end_date:
+            raise ValueError(
+                f"{self.RESOURCE_NAME} requires start_date <= end_date, "
+                f"got {start_date} > {end_date}"
+            )
+
+    def resolve_database(self, filters: dict[str, Any]) -> str:
+        return "rq_data"
+
+    def resolve_table(self, filters: dict[str, Any]) -> str:
+        return "trading_dates"
+
+    def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            "market": {"column": "market", "op": "eq"},
+            "trading_date": {"column": "trading_date", "op": "eq"},
+            "start_date": {"column": "trading_date", "op": "gte"},
+            "end_date": {"column": "trading_date", "op": "lte"},
+        }
+
+    def normalize_df(
+        self,
+        df: pd.DataFrame,
+        filters: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        if df is None:
+            return pd.DataFrame(columns=self.COLUMNS)
+
+        # rqdatac.get_trading_dates 返回 list[datetime.date]
+        if isinstance(df, list):
+            df = pd.DataFrame({"trading_date": df})
+        elif not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame(df)
+
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+        elif df.index.name is not None:
+            df = df.reset_index()
+
+        result = df.copy()
+
+        if "trading_date" not in result.columns:
+            if len(result.columns) == 1:
+                result = result.rename(columns={result.columns[0]: "trading_date"})
+            else:
+                raise ValueError(
+                    f"{self.RESOURCE_NAME} dataframe missing trading_date column, "
+                    f"columns={list(result.columns)}"
+                )
+
+        s = pd.to_datetime(result["trading_date"], errors="coerce")
+        result["trading_date"] = s.dt.date
+        result["trading_date"] = result["trading_date"].where(s.notna(), None)
+
+        result["market"] = (filters or {}).get("market", "cn")
+
+        if result["trading_date"].isna().any():
+            bad_rows = result[result["trading_date"].isna()]
+            raise ValueError(
+                f"{self.RESOURCE_NAME} dataframe contains null trading_date rows: {len(bad_rows)}"
+            )
+
+        return result[self.COLUMNS]
+
+    def filter_df(
+        self,
+        df: pd.DataFrame,
+        filters: dict[str, Any],
+    ) -> pd.DataFrame:
+        if df.empty:
+            return df
+
+        result = df.copy()
+        if "trading_date" in result.columns:
+            result["trading_date"] = pd.to_datetime(result["trading_date"], errors="coerce").dt.date
+
+        normalized_filters = dict(filters)
+        if "start_date" in normalized_filters:
+            normalized_filters["start_date"] = pd.to_datetime(normalized_filters["start_date"]).date()
+        if "end_date" in normalized_filters:
+            normalized_filters["end_date"] = pd.to_datetime(normalized_filters["end_date"]).date()
+
+        return super().filter_df(result, normalized_filters)
+

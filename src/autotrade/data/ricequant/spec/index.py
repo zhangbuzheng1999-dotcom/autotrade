@@ -8,7 +8,6 @@ import pandas as pd
 
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
-
 class IndexInstrumentSpec(BaseRQSpec):
     """
     all_instruments(type='INDX')
@@ -35,6 +34,8 @@ class IndexInstrumentSpec(BaseRQSpec):
 
     RESOURCE_NAME = "index_instruments"
     RESOURCE_TYPE = "snapshot"
+    STORAGE_BACKEND = "mysql"
+    WRITE_MODE = "snapshot_upsert"
 
     DATABASE = "rq_index_data"
     TABLE = "index_instruments"

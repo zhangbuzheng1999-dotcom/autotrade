@@ -8,7 +8,6 @@ import pandas as pd
 
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
-
 class FutureInstrumentSpec(BaseRQSpec):
     """
     all_instruments(type='Future')
@@ -36,6 +35,8 @@ class FutureInstrumentSpec(BaseRQSpec):
 
     RESOURCE_NAME = "future_instruments"
     RESOURCE_TYPE = "snapshot"
+    STORAGE_BACKEND = "mysql"
+    WRITE_MODE = "snapshot_upsert"
 
     DATABASE = "rq_future_data"
     TABLE = "future_instruments"

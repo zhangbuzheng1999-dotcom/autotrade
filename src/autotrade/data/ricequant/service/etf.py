@@ -6,7 +6,6 @@ from autotrade.data.ricequant.repository.etf import ETFInstrumentRepository
 from autotrade.data.ricequant.service.common import PriceService
 from autotrade.data.ricequant.spec.etf import ETFInstrumentSpec
 
-
 class ETFPriceService(PriceService):
     """
     ETF价格接口：固定 type='ETF'

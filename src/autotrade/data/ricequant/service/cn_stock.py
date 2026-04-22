@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from autotrade.data.ricequant.base import BaseRQService, FetchMode, FetchResult
 from autotrade.data.ricequant.datasource.cn_stock import CNStockInstrumentDataSource
 from autotrade.data.ricequant.repository.cn_stock import CNStockInstrumentRepository

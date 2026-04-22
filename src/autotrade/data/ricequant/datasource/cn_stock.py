@@ -7,7 +7,6 @@ from rqdatac import init as rq_init
 from autotrade.data.ricequant.base import BaseRQDataSource
 from autotrade.data.ricequant.spec.cn_stock import CNStockInstrumentSpec
 
-
 class CNStockInstrumentDataSource(BaseRQDataSource):
     """
     all_instruments(type='CS') datasource

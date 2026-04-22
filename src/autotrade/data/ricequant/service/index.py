@@ -8,7 +8,6 @@ from autotrade.data.ricequant.repository.index import IndexInstrumentRepository
 from autotrade.data.ricequant.service.common import PriceService
 from autotrade.data.ricequant.spec.index import IndexInstrumentSpec
 
-
 class IndexPriceService(PriceService):
     """
     指数价格接口：
@@ -56,7 +55,6 @@ class IndexInstrumentService(BaseRQService):
             repo=repo,
             source=source,
         )
-
 
 
 
