@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime
 from autotrade.coreutils.config import DatabaseInfo, load_env
-from autotrade.data.ricequant._clickhouse import ClickHouseHTTPClient
+from autotrade.data.ricequant._clickhouse import ClickHouseClient
 
 
 def _import_pymysql():
@@ -34,7 +34,7 @@ RQ_DATABASES = {
     "rq_index_data",
 }
 
-CLICKHOUSE_CLIENT = ClickHouseHTTPClient()
+CLICKHOUSE_CLIENT = ClickHouseClient()
 
 
 # ============================================================
@@ -257,9 +257,9 @@ def create_price_tables_for_database(database_name: str, table_prefix: str) -> N
         execute_sql(build_minute_price_table_sql(table_name), database=database_name)
 
 
-def build_clickhouse_daily_price_table_sql(table_name: str) -> str:
+def build_clickhouse_daily_price_table_sql(database_name,table_name: str) -> str:
     return f"""
-    CREATE TABLE IF NOT EXISTS `{table_name}` (
+    CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
         `order_book_id` String,
         `date` Date,
         `type` String,
@@ -290,15 +290,14 @@ def build_clickhouse_daily_price_table_sql(table_name: str) -> str:
     ORDER BY (`date`, `order_book_id`)
     """
 
-def build_clickhouse_minute_price_table_sql(table_name: str) -> str:
+def build_clickhouse_minute_price_table_sql(database_name, table_name: str) -> str:
     return f"""
-    CREATE TABLE IF NOT EXISTS `{table_name}` (
+    CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
         `order_book_id` String,
         `datetime` DateTime,
         `type` String,
         `frequency` String,
         `market` String,
-        `trading_date` Nullable(Date),
         `open` Nullable(Float64),
         `close` Nullable(Float64),
         `high` Nullable(Float64),
@@ -329,14 +328,14 @@ def create_clickhouse_price_tables_for_database(database_name: str, table_prefix
     for freq in DAILY_FREQUENCIES:
         table_name = f"{table_prefix}_{freq}"
         execute_clickhouse_sql(
-            build_clickhouse_daily_price_table_sql(table_name),
+            build_clickhouse_daily_price_table_sql(database_name,table_name),
             database=database_name,
         )
 
     for freq in MINUTE_FREQUENCIES:
         table_name = f"{table_prefix}_{freq}"
         execute_clickhouse_sql(
-            build_clickhouse_minute_price_table_sql(table_name),
+            build_clickhouse_minute_price_table_sql(database_name,table_name),
             database=database_name,
         )
 
@@ -840,6 +839,5 @@ def rebuild_all_clickhouse_tables() -> None:
 
 if __name__ == "__main__":
     load_env()
-
     init_rq_db()
     print("RiceQuant MySQL metadata and ClickHouse timeseries databases initialized successfully.")

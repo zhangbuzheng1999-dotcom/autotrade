@@ -94,7 +94,6 @@ class PriceSpec(BaseRQSpec):
 
         "date",
         "datetime",
-        "trading_date",
         "start_date",
         "end_date",
 
@@ -123,12 +122,12 @@ class PriceSpec(BaseRQSpec):
         "frequency",
     }
 
-    DATE_FIELDS = {"date", "datetime", "trading_date", "start_date", "end_date"}
+    DATE_FIELDS = {"date", "datetime", "start_date", "end_date"}
     CODE_FIELDS = {"order_book_id", "order_book_ids"}
 
     DEFAULT_FILTERS = {
         "market": "cn",
-        "adjust_type": "pre",
+        "adjust_type": "none",
         "skip_suspended": False,
         "expect_df": True,
         "frequency": "1d",
@@ -231,11 +230,7 @@ class PriceSpec(BaseRQSpec):
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         frequency = filters.get("frequency")
-        # DB-side start/end filters should preserve the same day-range semantics
-        # as the RiceQuant API. For minute bars, filtering on `datetime` with a
-        # date-only value like `2024-01-10` would collapse the upper bound to
-        # midnight and miss all intraday rows, so use `trading_date` instead.
-        time_col = "trading_date" if self.is_minute_frequency(frequency) else "date"
+        time_col = "datetime" if self.is_minute_frequency(frequency) else "date"
 
         return {
             "type": {"column": "type", "op": "eq"},
@@ -250,7 +245,6 @@ class PriceSpec(BaseRQSpec):
 
             "date": {"column": "date", "op": "eq"},
             "datetime": {"column": "datetime", "op": "eq"},
-            "trading_date": {"column": "trading_date", "op": "eq"},
 
             "open": {"column": "open", "op": "eq"},
             "close": {"column": "close", "op": "eq"},
@@ -334,15 +328,6 @@ class PriceSpec(BaseRQSpec):
 
             if "date" in df.columns:
                 df = df.drop(columns=["date"])
-
-            start_date = filters.get("start_date")
-            end_date = filters.get("end_date")
-
-            if "trading_date" not in df.columns:
-                if start_date is not None and end_date is not None and str(start_date) == str(end_date):
-                    df["trading_date"] = pd.to_datetime(start_date).date()
-                else:
-                    df["trading_date"] = None
 
         else:
             raise ValueError(f"unsupported frequency={frequency}")
