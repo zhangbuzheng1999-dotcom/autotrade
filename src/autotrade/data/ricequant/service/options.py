@@ -2,37 +2,25 @@
 
 from __future__ import annotations
 
-from autotrade.data.ricequant.base import BaseRQService, FetchMode, FetchResult,FetchStatus
+from autotrade.data.ricequant.base import BaseRQService, FetchMode, FetchResult, FetchStatus
 from autotrade.data.ricequant.datasource.options import *
 from autotrade.data.ricequant.repository.options import *
-from autotrade.data.ricequant.service.common import PriceService
 from autotrade.data.ricequant.spec.options import *
 
 
-class OptionPriceService(PriceService):
-    """
-    期权价格接口：
-    复用 common.PriceService，固定 type='Option'
-    """
-
-    FIXED_TYPE = "Option"
-
-    def get(
+class OptionPriceService(BaseRQService):
+    def __init__(
         self,
         *,
-        mode: FetchMode = FetchMode.DB_THEN_SOURCE,
-        persist: bool = True,
-        refresh: bool = False,
-        **filters,
-    ) -> FetchResult:
-        filters = dict(filters)
-        filters["type"] = self.FIXED_TYPE
-        return super().get(
-            mode=mode,
-            persist=persist,
-            refresh=refresh,
-            **filters,
-        )
+        spec: OptionPriceSpec | None = None,
+        repo: OptionPriceRepository | None = None,
+        source: OptionPriceDataSource | None = None,
+    ):
+        spec = spec or OptionPriceSpec()
+        repo = repo or OptionPriceRepository(spec)
+        source = source or OptionPriceDataSource(spec)
+
+        super().__init__(spec=spec, repo=repo, source=source)
 
 
 class OptionInstrumentService(BaseRQService):
@@ -117,4 +105,3 @@ class OptionGreeksService(BaseRQService):
 
         result.data = df[id_cols + value_cols]
         return result
-

@@ -2,36 +2,25 @@
 
 from __future__ import annotations
 
-from autotrade.data.ricequant.base import BaseRQService, FetchMode, FetchResult
-from autotrade.data.ricequant.datasource.index import IndexInstrumentDataSource
-from autotrade.data.ricequant.repository.index import IndexInstrumentRepository
-from autotrade.data.ricequant.service.common import PriceService
-from autotrade.data.ricequant.spec.index import IndexInstrumentSpec
+from autotrade.data.ricequant.base import BaseRQService
+from autotrade.data.ricequant.datasource.index import IndexInstrumentDataSource, IndexPriceDataSource
+from autotrade.data.ricequant.repository.index import IndexInstrumentRepository, IndexPriceRepository
+from autotrade.data.ricequant.spec.index import IndexInstrumentSpec, IndexPriceSpec
 
-class IndexPriceService(PriceService):
-    """
-    指数价格接口：
-    复用 common.PriceService，固定 type='INDX'
-    """
 
-    FIXED_TYPE = "INDX"
-
-    def get(
+class IndexPriceService(BaseRQService):
+    def __init__(
         self,
         *,
-        mode: FetchMode = FetchMode.DB_THEN_SOURCE,
-        persist: bool = True,
-        refresh: bool = False,
-        **filters,
-    ) -> FetchResult:
-        filters = dict(filters)
-        filters["type"] = self.FIXED_TYPE
-        return super().get(
-            mode=mode,
-            persist=persist,
-            refresh=refresh,
-            **filters,
-        )
+        spec: IndexPriceSpec | None = None,
+        repo: IndexPriceRepository | None = None,
+        source: IndexPriceDataSource | None = None,
+    ):
+        spec = spec or IndexPriceSpec()
+        repo = repo or IndexPriceRepository(spec)
+        source = source or IndexPriceDataSource(spec)
+
+        super().__init__(spec=spec, repo=repo, source=source)
 
 
 class IndexInstrumentService(BaseRQService):
@@ -55,7 +44,6 @@ class IndexInstrumentService(BaseRQService):
             repo=repo,
             source=source,
         )
-
 
 
 

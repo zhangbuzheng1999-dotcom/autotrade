@@ -234,6 +234,9 @@ class BaseRQSpec(ABC):
             return "snapshot_upsert"
         return "timeseries_append"
 
+    def normalize_db_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+        return dict(filters)
+
     # --------------------------------------------------------
     # db filter specs
     # --------------------------------------------------------
@@ -412,6 +415,7 @@ class BaseRQRepository:
         filters = self.spec.normalize_query_filters(filters)
         filters = self.spec.fill_default_filters(filters)
         self.spec.validate_filters(filters, mode=FetchMode.DB_ONLY)
+        filters = self.spec.normalize_db_query_filters(filters)
 
         database = self.spec.resolve_database(filters)
         table = self.spec.resolve_table(filters)
@@ -632,6 +636,7 @@ class BaseClickHouseRepository:
         filters = self.spec.normalize_query_filters(filters)
         filters = self.spec.fill_default_filters(filters)
         self.spec.validate_filters(filters, mode=FetchMode.DB_ONLY)
+        filters = self.spec.normalize_db_query_filters(filters)
 
         chunk_field = self._find_chunkable_in_filter(filters)
 

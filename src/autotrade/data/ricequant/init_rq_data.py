@@ -156,7 +156,7 @@ def build_month_range_partitions_sql(
 
 
 # ============================================================
-# Reusable price table builders
+# Internal shared price table builders
 # ============================================================
 
 def build_daily_price_table_sql(table_name: str) -> str:
@@ -257,7 +257,7 @@ def create_price_tables_for_database(database_name: str, table_prefix: str) -> N
         execute_sql(build_minute_price_table_sql(table_name), database=database_name)
 
 
-def build_clickhouse_daily_price_table_sql(database_name,table_name: str) -> str:
+def _build_clickhouse_daily_price_table_sql(database_name: str, table_name: str) -> str:
     return f"""
     CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
         `order_book_id` String,
@@ -290,7 +290,43 @@ def build_clickhouse_daily_price_table_sql(database_name,table_name: str) -> str
     ORDER BY (`date`, `order_book_id`)
     """
 
-def build_clickhouse_minute_price_table_sql(database_name, table_name: str) -> str:
+
+def _build_clickhouse_daily_adjusted_price_table_sql(database_name: str, table_name: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
+        `order_book_id` String,
+        `date` Date,
+        `adjust_type` String,
+        `type` String,
+        `frequency` String,
+        `market` String,
+        `open` Nullable(Float64),
+        `close` Nullable(Float64),
+        `high` Nullable(Float64),
+        `low` Nullable(Float64),
+        `limit_up` Nullable(Float64),
+        `limit_down` Nullable(Float64),
+        `total_turnover` Nullable(Float64),
+        `volume` Nullable(Float64),
+        `num_trades` Nullable(Float64),
+        `prev_close` Nullable(Float64),
+        `settlement` Nullable(Float64),
+        `prev_settlement` Nullable(Float64),
+        `open_interest` Nullable(Float64),
+        `dominant_id` Nullable(String),
+        `strike_price` Nullable(Float64),
+        `contract_multiplier` Nullable(Float64),
+        `iopv` Nullable(Float64),
+        `day_session_open` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`date`)
+    ORDER BY (`date`, `order_book_id`, `adjust_type`)
+    """
+
+
+def _build_clickhouse_minute_price_table_sql(database_name: str, table_name: str) -> str:
     return f"""
     CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
         `order_book_id` String,
@@ -324,18 +360,157 @@ def build_clickhouse_minute_price_table_sql(database_name, table_name: str) -> s
     """
 
 
-def create_clickhouse_price_tables_for_database(database_name: str, table_prefix: str) -> None:
+def _build_clickhouse_minute_adjusted_price_table_sql(database_name: str, table_name: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
+        `order_book_id` String,
+        `datetime` DateTime,
+        `adjust_type` String,
+        `type` String,
+        `frequency` String,
+        `market` String,
+        `open` Nullable(Float64),
+        `close` Nullable(Float64),
+        `high` Nullable(Float64),
+        `low` Nullable(Float64),
+        `limit_up` Nullable(Float64),
+        `limit_down` Nullable(Float64),
+        `total_turnover` Nullable(Float64),
+        `volume` Nullable(Float64),
+        `num_trades` Nullable(Float64),
+        `prev_close` Nullable(Float64),
+        `settlement` Nullable(Float64),
+        `prev_settlement` Nullable(Float64),
+        `open_interest` Nullable(Float64),
+        `dominant_id` Nullable(String),
+        `strike_price` Nullable(Float64),
+        `contract_multiplier` Nullable(Float64),
+        `iopv` Nullable(Float64),
+        `day_session_open` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`datetime`)
+    ORDER BY (`datetime`, `order_book_id`, `adjust_type`)
+    """
+
+
+def _create_clickhouse_price_tables_for_database(database_name: str, table_prefix: str) -> None:
     for freq in DAILY_FREQUENCIES:
         table_name = f"{table_prefix}_{freq}"
         execute_clickhouse_sql(
-            build_clickhouse_daily_price_table_sql(database_name,table_name),
+            _build_clickhouse_daily_price_table_sql(database_name, table_name),
             database=database_name,
         )
 
     for freq in MINUTE_FREQUENCIES:
         table_name = f"{table_prefix}_{freq}"
         execute_clickhouse_sql(
-            build_clickhouse_minute_price_table_sql(database_name,table_name),
+            _build_clickhouse_minute_price_table_sql(database_name, table_name),
+            database=database_name,
+        )
+
+
+# ============================================================
+# Futures price tables
+# ============================================================
+
+def build_future_daily_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_daily_price_table_sql("rq_future_data", table_name)
+
+
+def build_future_minute_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_minute_price_table_sql("rq_future_data", table_name)
+
+
+def create_future_price_tables(database_name: str = "rq_future_data") -> None:
+    _create_clickhouse_price_tables_for_database(database_name, "future_price")
+
+
+# ============================================================
+# Options price tables
+# ============================================================
+
+def build_option_daily_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_daily_price_table_sql("rq_option_data", table_name)
+
+
+def build_option_minute_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_minute_price_table_sql("rq_option_data", table_name)
+
+
+def create_option_price_tables(database_name: str = "rq_option_data") -> None:
+    _create_clickhouse_price_tables_for_database(database_name, "option_price")
+
+
+# ============================================================
+# Index price tables
+# ============================================================
+
+def build_index_daily_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_daily_price_table_sql("rq_index_data", table_name)
+
+
+def build_index_minute_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_minute_price_table_sql("rq_index_data", table_name)
+
+
+def create_index_price_tables(database_name: str = "rq_index_data") -> None:
+    _create_clickhouse_price_tables_for_database(database_name, "index_price")
+
+
+# ============================================================
+# CN stock price tables
+# ============================================================
+
+def build_cn_stock_daily_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_daily_adjusted_price_table_sql("rq_stock_data", table_name)
+
+
+def build_cn_stock_minute_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_minute_adjusted_price_table_sql("rq_stock_data", table_name)
+
+
+def create_cn_stock_price_tables(database_name: str = "rq_stock_data") -> None:
+    for freq in DAILY_FREQUENCIES:
+        table_name = f"stock_price_{freq}"
+        execute_clickhouse_sql(
+            build_cn_stock_daily_price_table_sql(table_name),
+            database=database_name,
+        )
+
+    for freq in MINUTE_FREQUENCIES:
+        table_name = f"stock_price_{freq}"
+        execute_clickhouse_sql(
+            build_cn_stock_minute_price_table_sql(table_name),
+            database=database_name,
+        )
+
+
+# ============================================================
+# ETF price tables
+# ============================================================
+
+def build_etf_daily_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_daily_adjusted_price_table_sql("rq_etf_data", table_name)
+
+
+def build_etf_minute_price_table_sql(table_name: str) -> str:
+    return _build_clickhouse_minute_adjusted_price_table_sql("rq_etf_data", table_name)
+
+
+def create_etf_price_tables(database_name: str = "rq_etf_data") -> None:
+    for freq in DAILY_FREQUENCIES:
+        table_name = f"etf_price_{freq}"
+        execute_clickhouse_sql(
+            build_etf_daily_price_table_sql(table_name),
+            database=database_name,
+        )
+
+    for freq in MINUTE_FREQUENCIES:
+        table_name = f"etf_price_{freq}"
+        execute_clickhouse_sql(
+            build_etf_minute_price_table_sql(table_name),
             database=database_name,
         )
 
@@ -414,10 +589,7 @@ def create_rq_futures_data(database_name: str = "rq_future_data") -> None:
     create_clickhouse_database_if_not_exists(database_name)
 
     # 高频 / 时序 price 表走 ClickHouse
-    create_clickhouse_price_tables_for_database(
-        database_name=database_name,
-        table_prefix="future_price",
-    )
+    create_future_price_tables(database_name=database_name)
 
     # futures 元数据表走 MySQL
     create_future_specific_tables(database_name=database_name)
@@ -527,10 +699,7 @@ def create_rq_options_data(database_name: str = "rq_option_data") -> None:
     create_clickhouse_database_if_not_exists(database_name)
 
     # 高频 / 时序 price 表走 ClickHouse
-    create_clickhouse_price_tables_for_database(
-        database_name=database_name,
-        table_prefix="option_price",
-    )
+    create_option_price_tables(database_name=database_name)
 
     create_option_greeks_tables(database_name=database_name)
 
@@ -606,10 +775,7 @@ def create_rq_index_data(database_name: str = "rq_index_data") -> None:
     create_clickhouse_database_if_not_exists(database_name)
 
     # 时序 price 表走 ClickHouse
-    create_clickhouse_price_tables_for_database(
-        database_name=database_name,
-        table_prefix="index_price",
-    )
+    create_index_price_tables(database_name=database_name)
 
     # index 元数据表走 MySQL
     create_index_specific_tables(database_name=database_name)
@@ -673,10 +839,7 @@ def create_rq_cn_stock_data(database_name: str = "rq_stock_data") -> None:
     create_mysql_database_if_not_exists(database_name)
     create_clickhouse_database_if_not_exists(database_name)
 
-    create_clickhouse_price_tables_for_database(
-        database_name=database_name,
-        table_prefix="stock_price",
-    )
+    create_cn_stock_price_tables(database_name=database_name)
 
     create_cn_stock_specific_tables(database_name=database_name)
 
@@ -739,10 +902,7 @@ def create_rq_etf_data(database_name: str = "rq_etf_data") -> None:
     create_mysql_database_if_not_exists(database_name)
     create_clickhouse_database_if_not_exists(database_name)
 
-    create_clickhouse_price_tables_for_database(
-        database_name=database_name,
-        table_prefix="etf_price",
-    )
+    create_etf_price_tables(database_name=database_name)
 
     create_etf_specific_tables(database_name=database_name)
 
@@ -794,15 +954,15 @@ def rebuild_all_clickhouse_tables() -> None:
 
     # 需要重建的 ClickHouse price 表
     table_groups = [
-        ("rq_future_data", "future_price"),
-        ("rq_option_data", "option_price"),
-        ("rq_index_data", "index_price"),
-        ("rq_stock_data", "stock_price"),
-        ("rq_etf_data", "etf_price"),
+        ("rq_future_data", "future_price", create_future_price_tables),
+        ("rq_option_data", "option_price", create_option_price_tables),
+        ("rq_index_data", "index_price", create_index_price_tables),
+        ("rq_stock_data", "stock_price", create_cn_stock_price_tables),
+        ("rq_etf_data", "etf_price", create_etf_price_tables),
     ]
 
     # 先删除所有 price 表
-    for database_name, table_prefix in table_groups:
+    for database_name, table_prefix, _create_tables in table_groups:
         for freq in DAILY_FREQUENCIES:
             table_name = f"{table_prefix}_{freq}"
             execute_clickhouse_sql(
@@ -828,11 +988,8 @@ def rebuild_all_clickhouse_tables() -> None:
     )
 
     # 重建所有 price 表
-    for database_name, table_prefix in table_groups:
-        create_clickhouse_price_tables_for_database(
-            database_name=database_name,
-            table_prefix=table_prefix,
-        )
+    for database_name, _table_prefix, create_tables in table_groups:
+        create_tables(database_name=database_name)
 
     # 重建 option greeks 表
     create_option_greeks_tables(database_name="rq_option_data")

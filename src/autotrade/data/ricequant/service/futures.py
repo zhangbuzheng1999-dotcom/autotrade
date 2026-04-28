@@ -1,37 +1,24 @@
 # autotrade/data/ricequant/service/futures.py
 from __future__ import annotations
-from autotrade.data.ricequant.base import BaseRQService, FetchMode, FetchResult
-from autotrade.data.ricequant.service.common import PriceService
-from autotrade.data.ricequant.spec.futures import FutureInstrumentSpec
-from autotrade.data.ricequant.repository.futures import FutureInstrumentRepository
-from autotrade.data.ricequant.datasource.futures import FutureInstrumentDataSource
+from autotrade.data.ricequant.base import BaseRQService
+from autotrade.data.ricequant.spec.futures import FutureInstrumentSpec, FuturePriceSpec
+from autotrade.data.ricequant.repository.futures import FutureInstrumentRepository, FuturePriceRepository
+from autotrade.data.ricequant.datasource.futures import FutureInstrumentDataSource, FuturePriceDataSource
 
-class FuturePriceService(PriceService):
-    """
-    Futures price facade.
 
-    复用 common.PriceService，
-    对外固定 type='Future'，避免业务层重复传 type。
-    """
-
-    FIXED_TYPE = "Future"
-
-    def get(
+class FuturePriceService(BaseRQService):
+    def __init__(
         self,
         *,
-        mode: FetchMode = FetchMode.DB_THEN_SOURCE,
-        persist: bool = True,
-        refresh: bool = False,
-        **filters,
-    ) -> FetchResult:
-        filters = dict(filters)
-        filters["type"] = self.FIXED_TYPE
-        return super().get(
-            mode=mode,
-            persist=persist,
-            refresh=refresh,
-            **filters,
-        )
+        spec: FuturePriceSpec | None = None,
+        repo: FuturePriceRepository | None = None,
+        source: FuturePriceDataSource | None = None,
+    ):
+        spec = spec or FuturePriceSpec()
+        repo = repo or FuturePriceRepository(spec)
+        source = source or FuturePriceDataSource(spec)
+
+        super().__init__(spec=spec, repo=repo, source=source)
 
 
 class FutureInstrumentService(BaseRQService):

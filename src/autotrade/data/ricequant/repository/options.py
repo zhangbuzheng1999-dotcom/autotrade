@@ -10,6 +10,11 @@ from autotrade.data.ricequant.base import (
 from autotrade.data.ricequant.spec.options import *
 
 
+class OptionPriceRepository(BaseClickHouseRepository):
+    def __init__(self, spec: OptionPriceSpec | None = None):
+        super().__init__(spec or OptionPriceSpec())
+
+
 class OptionInstrumentRepository(BaseRQRepository):
     """
     期权合约基础信息 repository

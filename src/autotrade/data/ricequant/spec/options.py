@@ -10,6 +10,222 @@ import pandas as pd
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
 
+class OptionPriceSpec(BaseRQSpec):
+    RESOURCE_NAME = "option_price"
+    RESOURCE_TYPE = "timeseries"
+    STORAGE_BACKEND = "clickhouse"
+    WRITE_MODE = "timeseries_append"
+    DATABASE = "rq_option_data"
+    TABLE_PREFIX = "option_price"
+    FIXED_TYPE = "Option"
+
+    PRIMARY_KEYS = []
+    SUPPORTED_FREQUENCIES = {"1d", "1w", "1m", "5m", "15m", "30m", "60m"}
+    MINUTE_FREQUENCIES = {"1m", "5m", "15m", "30m", "60m"}
+    DAILY_FREQUENCIES = {"1d", "1w"}
+    API_PARAMS = {
+        "order_book_ids", "start_date", "end_date", "frequency", "fields",
+        "adjust_type", "skip_suspended", "expect_df", "time_slice", "market",
+    }
+    API_REQUIRED_FILTERS = {"order_book_ids", "frequency"}
+    DB_QUERY_FIELDS = {
+        "frequency", "market", "order_book_id", "order_book_ids", "date", "datetime",
+        "start_date", "end_date", "open", "close", "high", "low", "limit_up",
+        "limit_down", "total_turnover", "volume", "num_trades", "prev_close",
+        "settlement", "prev_settlement", "open_interest", "dominant_id", "strike_price",
+        "contract_multiplier", "iopv", "day_session_open",
+    }
+    DB_REQUIRED_FILTERS = {"frequency"}
+    DATE_FIELDS = {"date", "datetime", "start_date", "end_date"}
+    CODE_FIELDS = {"order_book_id", "order_book_ids"}
+    DEFAULT_FILTERS = {
+        "market": "cn", "adjust_type": "none", "skip_suspended": False,
+        "expect_df": True, "frequency": "1d",
+    }
+
+    @classmethod
+    def is_minute_frequency(cls, frequency: str | None) -> bool:
+        return frequency in cls.MINUTE_FREQUENCIES
+
+    @classmethod
+    def is_daily_frequency(cls, frequency: str | None) -> bool:
+        return frequency in cls.DAILY_FREQUENCIES
+
+    def _normalize_order_book_ids(self, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, list):
+            return value
+        return list(value)
+
+    def normalize_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+        result = dict(filters)
+        result.pop("type", None)
+        if "order_book_id" in result and "order_book_ids" not in result:
+            result["order_book_ids"] = self._normalize_order_book_ids(result["order_book_id"])
+        if "order_book_ids" in result:
+            result["order_book_ids"] = self._normalize_order_book_ids(result["order_book_ids"])
+        return result
+
+    def validate_filters(self, filters: dict[str, Any], mode: FetchMode) -> None:
+        super().validate_filters(filters, mode)
+        frequency = filters.get("frequency")
+        if frequency not in self.SUPPORTED_FREQUENCIES:
+            raise ValueError(
+                "tick frequency is not supported in current version; "
+                "supported frequencies are ['1d', '1w', '1m', '5m', '15m', '30m', '60m']"
+            )
+        if frequency == "1w" and filters.get("expect_df") is False:
+            raise ValueError("weekly price query requires expect_df=True")
+        if mode in {FetchMode.SOURCE_ONLY, FetchMode.DB_THEN_SOURCE} and not filters.get("order_book_ids"):
+            raise ValueError(f"{self.RESOURCE_NAME} requires order_book_ids for mode={mode.value}")
+
+    def resolve_database(self, filters: dict[str, Any]) -> str:
+        return self.DATABASE
+
+    def resolve_table(self, filters: dict[str, Any]) -> str:
+        frequency = filters.get("frequency")
+        if not frequency:
+            raise ValueError(f"{self.RESOURCE_NAME} requires frequency for table routing")
+        return f"{self.TABLE_PREFIX}_{frequency}"
+
+    def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        frequency = filters.get("frequency")
+        time_col = "datetime" if self.is_minute_frequency(frequency) else "date"
+        return {
+            "frequency": {"column": "frequency", "op": "eq"},
+            "market": {"column": "market", "op": "eq"},
+            "order_book_id": {"column": "order_book_id", "op": "eq"},
+            "order_book_ids": {"column": "order_book_id", "op": "in"},
+            "start_date": {"column": time_col, "op": "gte"},
+            "end_date": {"column": time_col, "op": "lte"},
+            "date": {"column": "date", "op": "eq"},
+            "datetime": {"column": "datetime", "op": "eq"},
+            "open": {"column": "open", "op": "eq"},
+            "close": {"column": "close", "op": "eq"},
+            "high": {"column": "high", "op": "eq"},
+            "low": {"column": "low", "op": "eq"},
+            "limit_up": {"column": "limit_up", "op": "eq"},
+            "limit_down": {"column": "limit_down", "op": "eq"},
+            "total_turnover": {"column": "total_turnover", "op": "eq"},
+            "volume": {"column": "volume", "op": "eq"},
+            "num_trades": {"column": "num_trades", "op": "eq"},
+            "prev_close": {"column": "prev_close", "op": "eq"},
+            "settlement": {"column": "settlement", "op": "eq"},
+            "prev_settlement": {"column": "prev_settlement", "op": "eq"},
+            "open_interest": {"column": "open_interest", "op": "eq"},
+            "dominant_id": {"column": "dominant_id", "op": "eq"},
+            "strike_price": {"column": "strike_price", "op": "eq"},
+            "contract_multiplier": {"column": "contract_multiplier", "op": "eq"},
+            "iopv": {"column": "iopv", "op": "eq"},
+            "day_session_open": {"column": "day_session_open", "op": "eq"},
+        }
+
+    def normalize_db_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+        result = dict(filters)
+        frequency = result.get("frequency")
+        if self.is_minute_frequency(frequency):
+            if "start_date" in result:
+                result["start_date"] = pd.to_datetime(result["start_date"])
+            if "end_date" in result:
+                end_raw = pd.to_datetime(result["end_date"])
+                if end_raw.time() == pd.Timestamp(end_raw.date()).time():
+                    end_raw = end_raw + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                result["end_date"] = end_raw
+            if "datetime" in result:
+                result["datetime"] = pd.to_datetime(result["datetime"])
+        else:
+            if "start_date" in result:
+                result["start_date"] = pd.to_datetime(result["start_date"]).date()
+            if "end_date" in result:
+                result["end_date"] = pd.to_datetime(result["end_date"]).date()
+            if "date" in result:
+                result["date"] = pd.to_datetime(result["date"]).date()
+        return result
+
+    def split_filters(self, filters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        api_filters = {}
+        post_filters = {}
+        db_specs = self.resolve_db_filter_specs(filters)
+        for k, v in filters.items():
+            if k in self.API_PARAMS:
+                api_filters[k] = v
+            if k in db_specs:
+                post_filters[k] = v
+        return api_filters, post_filters
+
+    def normalize_df(self, df: pd.DataFrame, filters: dict[str, Any] | None = None) -> pd.DataFrame:
+        if df is None:
+            return pd.DataFrame()
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame(df)
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+        elif df.index.name is not None:
+            df = df.reset_index()
+        filters = filters or {}
+        frequency = filters.get("frequency")
+        if self.is_daily_frequency(frequency):
+            if "date" not in df.columns:
+                if "datetime" in df.columns:
+                    df = df.rename(columns={"datetime": "date"})
+                else:
+                    raise ValueError("daily/weekly price dataframe missing 'date' column")
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            if "datetime" in df.columns:
+                df = df.drop(columns=["datetime"])
+            if "trading_date" in df.columns:
+                df = df.drop(columns=["trading_date"])
+        elif self.is_minute_frequency(frequency):
+            if "datetime" not in df.columns:
+                if "date" in df.columns:
+                    df = df.rename(columns={"date": "datetime"})
+                else:
+                    raise ValueError("minute price dataframe missing 'datetime' column")
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            if "date" in df.columns:
+                df = df.drop(columns=["date"])
+            if "trading_date" in df.columns:
+                df = df.drop(columns=["trading_date"])
+        else:
+            raise ValueError(f"unsupported frequency={frequency}")
+        order_book_ids = filters.get("order_book_ids")
+        if "order_book_id" not in df.columns and order_book_ids and len(order_book_ids) == 1:
+            df["order_book_id"] = order_book_ids[0]
+        df["type"] = self.FIXED_TYPE
+        df["frequency"] = filters.get("frequency")
+        df["market"] = filters.get("market", "cn")
+        return df
+
+    def filter_df(self, df: pd.DataFrame, filters: dict[str, Any]) -> pd.DataFrame:
+        if df.empty:
+            return df
+        result = df.copy()
+        if "date" in result.columns:
+            result["date"] = pd.to_datetime(result["date"]).dt.date
+        if "datetime" in result.columns:
+            result["datetime"] = pd.to_datetime(result["datetime"])
+        post_filters = dict(filters)
+        if "start_date" in post_filters:
+            if self.is_minute_frequency(filters.get("frequency")):
+                post_filters["start_date"] = pd.to_datetime(post_filters["start_date"])
+            else:
+                post_filters["start_date"] = pd.to_datetime(post_filters["start_date"]).date()
+        if "end_date" in post_filters:
+            if self.is_minute_frequency(filters.get("frequency")):
+                end_raw = pd.to_datetime(post_filters["end_date"])
+                if end_raw.time() == pd.Timestamp(end_raw.date()).time():
+                    end_raw = end_raw + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                post_filters["end_date"] = end_raw
+            else:
+                post_filters["end_date"] = pd.to_datetime(post_filters["end_date"]).date()
+        return super().filter_df(result, post_filters)
+
+
 class OptionInstrumentSpec(BaseRQSpec):
     """
     all_instruments(type='Option')
@@ -471,6 +687,32 @@ class OptionGreeksSpec(BaseRQSpec):
             "theta": {"column": "theta", "op": "eq"},
             "rho": {"column": "rho", "op": "eq"},
         }
+
+    def normalize_db_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+        result = dict(filters)
+        frequency = result.get("frequency")
+
+        if self.is_minute_frequency(frequency):
+            if "start_date" in result:
+                result["start_date"] = pd.to_datetime(result["start_date"])
+
+            if "end_date" in result:
+                end_raw = pd.to_datetime(result["end_date"])
+                if end_raw.time() == pd.Timestamp(end_raw.date()).time():
+                    end_raw = end_raw + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                result["end_date"] = end_raw
+
+            if "datetime" in result:
+                result["datetime"] = pd.to_datetime(result["datetime"])
+        else:
+            if "start_date" in result:
+                result["start_date"] = pd.to_datetime(result["start_date"]).date()
+            if "end_date" in result:
+                result["end_date"] = pd.to_datetime(result["end_date"]).date()
+            if "trading_date" in result:
+                result["trading_date"] = pd.to_datetime(result["trading_date"]).date()
+
+        return result
 
     def split_filters(
         self,

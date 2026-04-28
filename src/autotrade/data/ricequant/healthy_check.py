@@ -1,14 +1,17 @@
+import warnings
+
 from autotrade.data.ricequant.service import common
-from autotrade.data.ricequant.base import FetchStatus
 from autotrade.data.ricequant.service import options as opt
 from autotrade.data.ricequant.service import futures as fut
 from autotrade.data.ricequant.service import index as ind
 from autotrade.data.ricequant.service import etf as etf
+from autotrade.data.ricequant.base import FetchStatus,FetchMode
 import pandas as pd
+
 
 def fut_healthy_check(start_date, end_date, data_service: fut.BaseRQService, include_contiunes=True):
     basic_info_ser = fut.FutureInstrumentService()
-    basic_info_data = basic_info_ser.get(mode=ind.FetchMode.SOURCE_ONLY)
+    basic_info_data = basic_info_ser.get(mode=FetchMode.SOURCE_ONLY)
     basic_info = basic_info_data.data
     if basic_info_data.status == FetchStatus.FAILED or basic_info.empty:
         raise Exception('合约信息查询出错')
@@ -63,7 +66,7 @@ def fut_healthy_check(start_date, end_date, data_service: fut.BaseRQService, inc
 
         exist_data = data_service.get(
             start_date=trade_date.strftime('%Y-%m-%d'), end_date=trade_date.strftime('%Y-%m-%d'),
-            mode=fut.FetchMode.DB_ONLY, frequency='1d')
+            mode=FetchMode.DB_ONLY, frequency='1d')
 
         if exist_data.status == FetchStatus.FAILED:
             raise Exception('待检查数据查询失败')
@@ -82,9 +85,9 @@ def fut_healthy_check(start_date, end_date, data_service: fut.BaseRQService, inc
 
 def opt_healthy_check(start_date, end_date, data_service: opt.BaseRQService):
     basic_info_ser = opt.OptionInstrumentService()
-    basic_info_data = basic_info_ser.get(mode=ind.FetchMode.SOURCE_ONLY)
+    basic_info_data = basic_info_ser.get(mode=FetchMode.SOURCE_ONLY)
     basic_info = basic_info_data.data
-    if basic_info_data.status == opt.FetchStatus.FAILED or basic_info.empty:
+    if basic_info_data.status == FetchStatus.FAILED or basic_info.empty:
         raise Exception('合约信息查询出错')
     basic_info['maturity_date'] = pd.to_datetime(basic_info['maturity_date'])
     basic_info['listed_date'] = pd.to_datetime(basic_info['listed_date'])
@@ -92,7 +95,7 @@ def opt_healthy_check(start_date, end_date, data_service: opt.BaseRQService):
     trade_dates_ser = common.TradingDatesService()
     trade_dates_data = trade_dates_ser.get(start_date=start_date, end_date=end_date)
     trade_dates = trade_dates_data.data
-    if trade_dates_data.status == opt.FetchStatus.FAILED or trade_dates.empty:
+    if trade_dates_data.status == FetchStatus.FAILED or trade_dates.empty:
         raise Exception('交易查询出错')
 
     trade_dates = pd.to_datetime(trade_dates['trading_date'])
@@ -106,9 +109,9 @@ def opt_healthy_check(start_date, end_date, data_service: opt.BaseRQService):
 
         exist_data = data_service.get(
             start_date=trade_date.strftime('%Y-%m-%d'), end_date=trade_date.strftime('%Y-%m-%d'),
-            mode=opt.FetchMode.DB_ONLY, frequency='1d')
+            mode=FetchMode.DB_ONLY, frequency='1d')
 
-        if exist_data.status == opt.FetchStatus.FAILED:
+        if exist_data.status == FetchStatus.FAILED:
             raise Exception('待检查数据查询失败')
         if exist_data.data.empty:
             missing_list[trade_date] = set(ins_should_exist)
@@ -125,9 +128,9 @@ def opt_healthy_check(start_date, end_date, data_service: opt.BaseRQService):
 
 def index_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
     basic_info_ser = ind.IndexInstrumentService()
-    basic_info_data = basic_info_ser.get(mode=ind.FetchMode.SOURCE_ONLY)
+    basic_info_data = basic_info_ser.get(mode=FetchMode.SOURCE_ONLY)
     basic_info = basic_info_data.data
-    if basic_info_data.status == opt.FetchStatus.FAILED or basic_info.empty:
+    if basic_info_data.status == FetchStatus.FAILED or basic_info.empty:
         raise Exception('合约信息查询出错')
     basic_info['listed_date'] = pd.to_datetime(basic_info['listed_date'])
     basic_info['de_listed_date'] = basic_info['de_listed_date'].fillna(pd.to_datetime(end_date))
@@ -136,14 +139,14 @@ def index_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
     trade_dates_ser = common.TradingDatesService()
     trade_dates_data = trade_dates_ser.get(start_date=start_date, end_date=end_date)
     trade_dates = trade_dates_data.data
-    if trade_dates_data.status == opt.FetchStatus.FAILED or trade_dates.empty:
+    if trade_dates_data.status == FetchStatus.FAILED or trade_dates.empty:
         raise Exception('交易查询出错')
 
     trade_dates = pd.to_datetime(trade_dates['trading_date'])
 
     missing_list = {}
     for trade_date in trade_dates:
-        
+
         # 理论应该存在的合约
         ins_should_exist = basic_info[
             (basic_info['de_listed_date'] >= trade_date) & (
@@ -151,9 +154,9 @@ def index_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
 
         exist_data = data_service.get(
             start_date=trade_date.strftime('%Y-%m-%d'), end_date=trade_date.strftime('%Y-%m-%d'),
-            mode=opt.FetchMode.DB_ONLY, frequency='1d')
+            mode=FetchMode.DB_ONLY, frequency='1d')
 
-        if exist_data.status == opt.FetchStatus.FAILED:
+        if exist_data.status == FetchStatus.FAILED:
             raise Exception('待检查数据查询失败')
         if exist_data.data.empty:
             missing_list[trade_date] = set(ins_should_exist)
@@ -166,11 +169,14 @@ def index_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
 
     return missing_list
 
-def etf_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
+
+def etf_healthy_check(start_date, end_date, data_service: ind.BaseRQService, adjust_type: str | None = None):
+    if adjust_type is None:
+        warnings.warn('ETF没有指定adjust_type')
     basic_info_ser = etf.ETFInstrumentService()
-    basic_info_data = basic_info_ser.get(mode=etf.FetchMode.SOURCE_ONLY)
+    basic_info_data = basic_info_ser.get(mode=FetchMode.SOURCE_ONLY)
     basic_info = basic_info_data.data
-    if basic_info_data.status == opt.FetchStatus.FAILED or basic_info.empty:
+    if basic_info_data.status == FetchStatus.FAILED or basic_info.empty:
         raise Exception('合约信息查询出错')
     basic_info['listed_date'] = pd.to_datetime(basic_info['listed_date'])
     basic_info['de_listed_date'] = basic_info['de_listed_date'].fillna(pd.to_datetime(end_date))
@@ -179,7 +185,7 @@ def etf_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
     trade_dates_ser = common.TradingDatesService()
     trade_dates_data = trade_dates_ser.get(start_date=start_date, end_date=end_date)
     trade_dates = trade_dates_data.data
-    if trade_dates_data.status == opt.FetchStatus.FAILED or trade_dates.empty:
+    if trade_dates_data.status == FetchStatus.FAILED or trade_dates.empty:
         raise Exception('交易查询出错')
 
     trade_dates = pd.to_datetime(trade_dates['trading_date'])
@@ -190,12 +196,16 @@ def etf_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
         ins_should_exist = basic_info[
             (basic_info['de_listed_date'] >= trade_date) & (
                     basic_info['listed_date'] <= trade_date)]['order_book_id'].astype(str).tolist()
+        if adjust_type is None:
+            exist_data = data_service.get(
+                start_date=trade_date.strftime('%Y-%m-%d'), end_date=trade_date.strftime('%Y-%m-%d'),
+                mode=FetchMode.DB_ONLY, frequency='1d')
+        else:
+            exist_data = data_service.get(
+                start_date=trade_date.strftime('%Y-%m-%d'), end_date=trade_date.strftime('%Y-%m-%d'),
+                mode=FetchMode.DB_ONLY, frequency='1d',adjust_type=adjust_type)
 
-        exist_data = data_service.get(
-            start_date=trade_date.strftime('%Y-%m-%d'), end_date=trade_date.strftime('%Y-%m-%d'),
-            mode=opt.FetchMode.DB_ONLY, frequency='1d')
-
-        if exist_data.status == opt.FetchStatus.FAILED:
+        if exist_data.status == FetchStatus.FAILED:
             raise Exception('待检查数据查询失败')
         if exist_data.data.empty:
             missing_list[trade_date] = set(ins_should_exist)
@@ -207,4 +217,3 @@ def etf_healthy_check(start_date, end_date, data_service: ind.BaseRQService):
         if len(missing_ids) > 0:
             missing_list[trade_date] = missing_ids
     return missing_list
-

@@ -1,34 +1,23 @@
 from __future__ import annotations
-from autotrade.data.ricequant.base import BaseRQService, FetchMode, FetchResult
-from autotrade.data.ricequant.datasource.cn_stock import CNStockInstrumentDataSource
-from autotrade.data.ricequant.repository.cn_stock import CNStockInstrumentRepository
-from autotrade.data.ricequant.service.common import PriceService
-from autotrade.data.ricequant.spec.cn_stock import CNStockInstrumentSpec
+from autotrade.data.ricequant.base import BaseRQService
+from autotrade.data.ricequant.datasource.cn_stock import CNStockInstrumentDataSource, CNStockPriceDataSource
+from autotrade.data.ricequant.repository.cn_stock import CNStockInstrumentRepository, CNStockPriceRepository
+from autotrade.data.ricequant.spec.cn_stock import CNStockInstrumentSpec, CNStockPriceSpec
 
 
-class CNStockPriceService(PriceService):
-    """
-    A股价格接口：固定 type='CS'
-    """
-
-    FIXED_TYPE = "CS"
-
-    def get(
+class CNStockPriceService(BaseRQService):
+    def __init__(
         self,
         *,
-        mode: FetchMode = FetchMode.DB_THEN_SOURCE,
-        persist: bool = True,
-        refresh: bool = False,
-        **filters,
-    ) -> FetchResult:
-        filters = dict(filters)
-        filters["type"] = self.FIXED_TYPE
-        return super().get(
-            mode=mode,
-            persist=persist,
-            refresh=refresh,
-            **filters,
-        )
+        spec: CNStockPriceSpec | None = None,
+        repo: CNStockPriceRepository | None = None,
+        source: CNStockPriceDataSource | None = None,
+    ):
+        spec = spec or CNStockPriceSpec()
+        repo = repo or CNStockPriceRepository(spec)
+        source = source or CNStockPriceDataSource(spec)
+
+        super().__init__(spec=spec, repo=repo, source=source)
 
 
 class CNStockInstrumentService(BaseRQService):

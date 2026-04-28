@@ -7,19 +7,15 @@ import pandas as pd
 from autotrade.data.ricequant.base import BaseRQSpec, FetchMode
 
 
-
-class PriceSpec(BaseRQSpec):
+class BaseAssetPriceSpec(BaseRQSpec):
     """
-    RiceQuant get_price spec
+    Shared behavior for asset-specific get_price specs.
 
-    当前版本 price 只支持以下资产数据库：
-    - CS      -> rq_stock_data
-    - ETF     -> rq_etf_data
-    - Future  -> rq_future_data
-    - Option  -> rq_option_data
-    - INDX    -> rq_index_data
-
-    其他类型暂不支持，后续如需支持必须扩展数据库路由与建表逻辑。
+    Concrete subclasses must define:
+    - RESOURCE_NAME
+    - DATABASE
+    - TABLE_PREFIX
+    - FIXED_TYPE
     """
 
     RESOURCE_NAME = "price"
@@ -29,6 +25,8 @@ class PriceSpec(BaseRQSpec):
 
     DATABASE = ""
     TABLE = ""
+    TABLE_PREFIX = ""
+    FIXED_TYPE = ""
 
     PRIMARY_KEYS = []
 
@@ -36,36 +34,10 @@ class PriceSpec(BaseRQSpec):
         "1d", "1w", "1m", "5m", "15m", "30m", "60m"
     }
 
-    # 当前版本只支持这些 type
-    SUPPORTED_TYPES = {
-        "CS",
-        "ETF",
-        "Future",
-        "Option",
-        "INDX",
-    }
-
-    TYPE_DATABASE_MAP = {
-        "CS": "rq_stock_data",
-        "ETF": "rq_etf_data",
-        "Future": "rq_future_data",
-        "Option": "rq_option_data",
-        "INDX": "rq_index_data",
-    }
-
-    TYPE_TABLE_PREFIX_MAP = {
-        "CS": "stock_price",
-        "ETF": "etf_price",
-        "Future": "future_price",
-        "Option": "option_price",
-        "INDX": "index_price",
-    }
-
     MINUTE_FREQUENCIES = {"1m", "5m", "15m", "30m", "60m"}
     DAILY_FREQUENCIES = {"1d", "1w"}
 
     API_PARAMS = {
-        "type",
         "order_book_ids",
         "start_date",
         "end_date",
@@ -79,13 +51,11 @@ class PriceSpec(BaseRQSpec):
     }
 
     API_REQUIRED_FILTERS = {
-        "type",
         "order_book_ids",
         "frequency",
     }
 
     DB_QUERY_FIELDS = {
-        "type",
         "frequency",
         "market",
 
@@ -118,7 +88,6 @@ class PriceSpec(BaseRQSpec):
     }
 
     DB_REQUIRED_FILTERS = {
-        "type",
         "frequency",
     }
 
@@ -156,6 +125,7 @@ class PriceSpec(BaseRQSpec):
 
     def normalize_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
         result = dict(filters)
+        result.pop("type", None)
 
         if "order_book_id" in result and "order_book_ids" not in result:
             result["order_book_ids"] = self._normalize_order_book_ids(result["order_book_id"])
@@ -171,14 +141,6 @@ class PriceSpec(BaseRQSpec):
         mode: FetchMode,
     ) -> None:
         super().validate_filters(filters, mode)
-
-        asset_type = filters.get("type")
-        if asset_type not in self.SUPPORTED_TYPES:
-            raise ValueError(
-                f"{self.RESOURCE_NAME} unsupported type={asset_type}. "
-                f"Current version only supports {sorted(self.SUPPORTED_TYPES)}. "
-                f"If you need this type, please extend database routing and table initialization first."
-            )
 
         frequency = filters.get("frequency")
         if frequency not in self.SUPPORTED_FREQUENCIES:
@@ -198,42 +160,26 @@ class PriceSpec(BaseRQSpec):
                 )
 
     def resolve_database(self, filters: dict[str, Any]) -> str:
-        asset_type = filters.get("type")
-
-        database = self.TYPE_DATABASE_MAP.get(asset_type)
-        if database is None:
-            raise ValueError(
-                f"{self.RESOURCE_NAME} unsupported type={asset_type}. "
-                f"Current version only supports {sorted(self.TYPE_DATABASE_MAP.keys())}. "
-                f"If you need this type, please extend database routing first."
-            )
-        return database
+        if not self.DATABASE:
+            raise ValueError(f"{self.RESOURCE_NAME} DATABASE is not configured")
+        return self.DATABASE
 
     def resolve_table(self, filters: dict[str, Any]) -> str:
-        asset_type = filters.get("type")
         frequency = filters.get("frequency")
 
-        if not asset_type:
-            raise ValueError(f"{self.RESOURCE_NAME} requires type for table routing")
         if not frequency:
             raise ValueError(f"{self.RESOURCE_NAME} requires frequency for table routing")
 
-        prefix = self.TYPE_TABLE_PREFIX_MAP.get(asset_type)
-        if prefix is None:
-            raise ValueError(
-                f"{self.RESOURCE_NAME} unsupported type={asset_type}. "
-                f"Current version only supports {sorted(self.TYPE_TABLE_PREFIX_MAP.keys())}. "
-                f"If you need this type, please extend table routing first."
-            )
+        if not self.TABLE_PREFIX:
+            raise ValueError(f"{self.RESOURCE_NAME} TABLE_PREFIX is not configured")
 
-        return f"{prefix}_{frequency}"
+        return f"{self.TABLE_PREFIX}_{frequency}"
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         frequency = filters.get("frequency")
         time_col = "datetime" if self.is_minute_frequency(frequency) else "date"
 
         return {
-            "type": {"column": "type", "op": "eq"},
             "frequency": {"column": "frequency", "op": "eq"},
             "market": {"column": "market", "op": "eq"},
 
@@ -265,6 +211,32 @@ class PriceSpec(BaseRQSpec):
             "iopv": {"column": "iopv", "op": "eq"},
             "day_session_open": {"column": "day_session_open", "op": "eq"},
         }
+
+    def normalize_db_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+        result = dict(filters)
+        frequency = result.get("frequency")
+
+        if self.is_minute_frequency(frequency):
+            if "start_date" in result:
+                result["start_date"] = pd.to_datetime(result["start_date"])
+
+            if "end_date" in result:
+                end_raw = pd.to_datetime(result["end_date"])
+                if end_raw.time() == pd.Timestamp(end_raw.date()).time():
+                    end_raw = end_raw + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                result["end_date"] = end_raw
+
+            if "datetime" in result:
+                result["datetime"] = pd.to_datetime(result["datetime"])
+        else:
+            if "start_date" in result:
+                result["start_date"] = pd.to_datetime(result["start_date"]).date()
+            if "end_date" in result:
+                result["end_date"] = pd.to_datetime(result["end_date"]).date()
+            if "date" in result:
+                result["date"] = pd.to_datetime(result["date"]).date()
+
+        return result
 
     def split_filters(
         self,
@@ -329,6 +301,9 @@ class PriceSpec(BaseRQSpec):
             if "date" in df.columns:
                 df = df.drop(columns=["date"])
 
+            if "trading_date" in df.columns:
+                df = df.drop(columns=["trading_date"])
+
         else:
             raise ValueError(f"unsupported frequency={frequency}")
 
@@ -336,7 +311,7 @@ class PriceSpec(BaseRQSpec):
         if "order_book_id" not in df.columns and order_book_ids and len(order_book_ids) == 1:
             df["order_book_id"] = order_book_ids[0]
 
-        df["type"] = filters.get("type")
+        df["type"] = self.FIXED_TYPE
         df["frequency"] = filters.get("frequency")
         df["market"] = filters.get("market", "cn")
 
@@ -543,4 +518,3 @@ class TradingDatesSpec(BaseRQSpec):
             normalized_filters["end_date"] = pd.to_datetime(normalized_filters["end_date"]).date()
 
         return super().filter_df(result, normalized_filters)
-
