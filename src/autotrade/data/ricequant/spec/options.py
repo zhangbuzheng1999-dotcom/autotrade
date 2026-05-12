@@ -30,13 +30,14 @@ class OptionPriceSpec(BaseRQSpec):
     API_REQUIRED_FILTERS = {"order_book_ids", "frequency"}
     DB_QUERY_FIELDS = {
         "frequency", "market", "order_book_id", "order_book_ids", "date", "datetime",
+        "trading_date",
         "start_date", "end_date", "open", "close", "high", "low", "limit_up",
         "limit_down", "total_turnover", "volume", "num_trades", "prev_close",
         "settlement", "prev_settlement", "open_interest", "dominant_id", "strike_price",
         "contract_multiplier", "iopv", "day_session_open",
     }
     DB_REQUIRED_FILTERS = {"frequency"}
-    DATE_FIELDS = {"date", "datetime", "start_date", "end_date"}
+    DATE_FIELDS = {"date", "datetime", "trading_date", "start_date", "end_date"}
     CODE_FIELDS = {"order_book_id", "order_book_ids"}
     DEFAULT_FILTERS = {
         "market": "cn", "adjust_type": "none", "skip_suspended": False,
@@ -95,7 +96,7 @@ class OptionPriceSpec(BaseRQSpec):
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         frequency = filters.get("frequency")
-        time_col = "datetime" if self.is_minute_frequency(frequency) else "date"
+        time_col = "trading_date" if self.is_minute_frequency(frequency) else "date"
         return {
             "frequency": {"column": "frequency", "op": "eq"},
             "market": {"column": "market", "op": "eq"},
@@ -105,6 +106,7 @@ class OptionPriceSpec(BaseRQSpec):
             "end_date": {"column": time_col, "op": "lte"},
             "date": {"column": "date", "op": "eq"},
             "datetime": {"column": "datetime", "op": "eq"},
+            "trading_date": {"column": "trading_date", "op": "eq"},
             "open": {"column": "open", "op": "eq"},
             "close": {"column": "close", "op": "eq"},
             "high": {"column": "high", "op": "eq"},
@@ -130,14 +132,13 @@ class OptionPriceSpec(BaseRQSpec):
         frequency = result.get("frequency")
         if self.is_minute_frequency(frequency):
             if "start_date" in result:
-                result["start_date"] = pd.to_datetime(result["start_date"])
+                result["start_date"] = pd.to_datetime(result["start_date"]).date()
             if "end_date" in result:
-                end_raw = pd.to_datetime(result["end_date"])
-                if end_raw.time() == pd.Timestamp(end_raw.date()).time():
-                    end_raw = end_raw + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-                result["end_date"] = end_raw
+                result["end_date"] = pd.to_datetime(result["end_date"]).date()
             if "datetime" in result:
                 result["datetime"] = pd.to_datetime(result["datetime"])
+            if "trading_date" in result:
+                result["trading_date"] = pd.to_datetime(result["trading_date"]).date()
         else:
             if "start_date" in result:
                 result["start_date"] = pd.to_datetime(result["start_date"]).date()
@@ -190,7 +191,9 @@ class OptionPriceSpec(BaseRQSpec):
             if "date" in df.columns:
                 df = df.drop(columns=["date"])
             if "trading_date" in df.columns:
-                df = df.drop(columns=["trading_date"])
+                df["trading_date"] = pd.to_datetime(df["trading_date"], errors="coerce").dt.date
+            else:
+                df["trading_date"] = df["datetime"].dt.date
         else:
             raise ValueError(f"unsupported frequency={frequency}")
         order_book_ids = filters.get("order_book_ids")
@@ -209,18 +212,17 @@ class OptionPriceSpec(BaseRQSpec):
             result["date"] = pd.to_datetime(result["date"]).dt.date
         if "datetime" in result.columns:
             result["datetime"] = pd.to_datetime(result["datetime"])
+        if "trading_date" in result.columns:
+            result["trading_date"] = pd.to_datetime(result["trading_date"], errors="coerce").dt.date
         post_filters = dict(filters)
         if "start_date" in post_filters:
             if self.is_minute_frequency(filters.get("frequency")):
-                post_filters["start_date"] = pd.to_datetime(post_filters["start_date"])
+                post_filters["start_date"] = pd.to_datetime(post_filters["start_date"]).date()
             else:
                 post_filters["start_date"] = pd.to_datetime(post_filters["start_date"]).date()
         if "end_date" in post_filters:
             if self.is_minute_frequency(filters.get("frequency")):
-                end_raw = pd.to_datetime(post_filters["end_date"])
-                if end_raw.time() == pd.Timestamp(end_raw.date()).time():
-                    end_raw = end_raw + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-                post_filters["end_date"] = end_raw
+                post_filters["end_date"] = pd.to_datetime(post_filters["end_date"]).date()
             else:
                 post_filters["end_date"] = pd.to_datetime(post_filters["end_date"]).date()
         return super().filter_df(result, post_filters)
@@ -268,6 +270,7 @@ class OptionInstrumentSpec(BaseRQSpec):
     API_REQUIRED_FILTERS = set()
 
     DB_QUERY_FIELDS = {
+        "order_book_ids",
         "order_book_id",
         "symbol",
         "underlying_symbol",
@@ -324,6 +327,9 @@ class OptionInstrumentSpec(BaseRQSpec):
     def normalize_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
         result = dict(filters)
         result.pop("type", None)
+        if "order_book_id" in result and "order_book_ids" not in result:
+            value = result["order_book_id"]
+            result["order_book_ids"] = [value] if isinstance(value, str) else list(value)
         return result
 
     def validate_filters(
@@ -353,6 +359,7 @@ class OptionInstrumentSpec(BaseRQSpec):
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return {
+            "order_book_ids": {"column": "order_book_id", "op": "in"},
             "order_book_id": {"column": "order_book_id", "op": "eq"},
             "symbol": {"column": "symbol", "op": "eq"},
             "underlying_symbol": {"column": "underlying_symbol", "op": "eq"},
@@ -377,7 +384,7 @@ class OptionInstrumentSpec(BaseRQSpec):
         post_filters = {}
 
         for k, v in filters.items():
-            if k in self.API_PARAMS:
+            if k in {"date", "market"}:
                 api_filters[k] = v
 
         db_specs = self.resolve_db_filter_specs(filters)

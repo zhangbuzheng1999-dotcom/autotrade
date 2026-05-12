@@ -266,6 +266,7 @@ class IndexInstrumentSpec(BaseRQSpec):
     API_REQUIRED_FILTERS = set()
 
     DB_QUERY_FIELDS = {
+        "order_book_ids",
         "order_book_id",
         "symbol",
         "industry_code",
@@ -332,6 +333,9 @@ class IndexInstrumentSpec(BaseRQSpec):
     def normalize_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
         result = dict(filters)
         result.pop("type", None)
+        if "order_book_id" in result and "order_book_ids" not in result:
+            value = result["order_book_id"]
+            result["order_book_ids"] = [value] if isinstance(value, str) else list(value)
         return result
 
     def validate_filters(
@@ -353,6 +357,7 @@ class IndexInstrumentSpec(BaseRQSpec):
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return {
+            "order_book_ids": {"column": "order_book_id", "op": "in"},
             "order_book_id": {"column": "order_book_id", "op": "eq"},
             "symbol": {"column": "symbol", "op": "eq"},
             "industry_code": {"column": "industry_code", "op": "eq"},
@@ -375,7 +380,7 @@ class IndexInstrumentSpec(BaseRQSpec):
         post_filters = {}
 
         for k, v in filters.items():
-            if k in self.API_PARAMS:
+            if k in {"date", "market"}:
                 api_filters[k] = v
 
         db_specs = self.resolve_db_filter_specs(filters)

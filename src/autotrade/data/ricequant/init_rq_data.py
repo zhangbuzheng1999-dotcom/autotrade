@@ -81,6 +81,14 @@ def create_clickhouse_database_if_not_exists(database_name: str) -> None:
     execute_clickhouse_sql(f"CREATE DATABASE IF NOT EXISTS `{database_name}`")
 
 
+def drop_mysql_database_if_exists(database_name: str) -> None:
+    execute_sql(f"DROP DATABASE IF EXISTS `{database_name}`")
+
+
+def drop_clickhouse_database_if_exists(database_name: str) -> None:
+    execute_clickhouse_sql(f"DROP DATABASE IF EXISTS `{database_name}`")
+
+
 def create_rq_base_databases() -> None:
     for db in RQ_DATABASES:
         create_mysql_database_if_not_exists(db)
@@ -360,6 +368,41 @@ def _build_clickhouse_minute_price_table_sql(database_name: str, table_name: str
     """
 
 
+def _build_clickhouse_minute_price_with_trading_date_table_sql(database_name: str, table_name: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
+        `order_book_id` String,
+        `datetime` DateTime,
+        `trading_date` Nullable(Date),
+        `type` String,
+        `frequency` String,
+        `market` String,
+        `open` Nullable(Float64),
+        `close` Nullable(Float64),
+        `high` Nullable(Float64),
+        `low` Nullable(Float64),
+        `limit_up` Nullable(Float64),
+        `limit_down` Nullable(Float64),
+        `total_turnover` Nullable(Float64),
+        `volume` Nullable(Float64),
+        `num_trades` Nullable(Float64),
+        `prev_close` Nullable(Float64),
+        `settlement` Nullable(Float64),
+        `prev_settlement` Nullable(Float64),
+        `open_interest` Nullable(Float64),
+        `dominant_id` Nullable(String),
+        `strike_price` Nullable(Float64),
+        `contract_multiplier` Nullable(Float64),
+        `iopv` Nullable(Float64),
+        `day_session_open` Nullable(Float64),
+        `ingest_time` DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`datetime`)
+    ORDER BY (`datetime`, `order_book_id`)
+    """
+
+
 def _build_clickhouse_minute_adjusted_price_table_sql(database_name: str, table_name: str) -> str:
     return f"""
     CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}` (
@@ -420,11 +463,23 @@ def build_future_daily_price_table_sql(table_name: str) -> str:
 
 
 def build_future_minute_price_table_sql(table_name: str) -> str:
-    return _build_clickhouse_minute_price_table_sql("rq_future_data", table_name)
+    return _build_clickhouse_minute_price_with_trading_date_table_sql("rq_future_data", table_name)
 
 
 def create_future_price_tables(database_name: str = "rq_future_data") -> None:
-    _create_clickhouse_price_tables_for_database(database_name, "future_price")
+    for freq in DAILY_FREQUENCIES:
+        table_name = f"future_price_{freq}"
+        execute_clickhouse_sql(
+            build_future_daily_price_table_sql(table_name),
+            database=database_name,
+        )
+
+    for freq in MINUTE_FREQUENCIES:
+        table_name = f"future_price_{freq}"
+        execute_clickhouse_sql(
+            build_future_minute_price_table_sql(table_name),
+            database=database_name,
+        )
 
 
 # ============================================================
@@ -436,11 +491,23 @@ def build_option_daily_price_table_sql(table_name: str) -> str:
 
 
 def build_option_minute_price_table_sql(table_name: str) -> str:
-    return _build_clickhouse_minute_price_table_sql("rq_option_data", table_name)
+    return _build_clickhouse_minute_price_with_trading_date_table_sql("rq_option_data", table_name)
 
 
 def create_option_price_tables(database_name: str = "rq_option_data") -> None:
-    _create_clickhouse_price_tables_for_database(database_name, "option_price")
+    for freq in DAILY_FREQUENCIES:
+        table_name = f"option_price_{freq}"
+        execute_clickhouse_sql(
+            build_option_daily_price_table_sql(table_name),
+            database=database_name,
+        )
+
+    for freq in MINUTE_FREQUENCIES:
+        table_name = f"option_price_{freq}"
+        execute_clickhouse_sql(
+            build_option_minute_price_table_sql(table_name),
+            database=database_name,
+        )
 
 
 # ============================================================
@@ -937,6 +1004,14 @@ def init_rq_db() -> None:
     create_rq_index_data()
     create_rq_cn_stock_data()
     create_rq_etf_data()
+
+
+def rebuild_rq_databases() -> None:
+    for db in sorted(RQ_DATABASES):
+        drop_clickhouse_database_if_exists(db)
+        drop_mysql_database_if_exists(db)
+
+    init_rq_db()
 
 def rebuild_all_clickhouse_tables() -> None:
     """
