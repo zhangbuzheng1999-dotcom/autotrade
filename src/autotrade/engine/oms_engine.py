@@ -1,23 +1,21 @@
 from datetime import datetime
+from copy import deepcopy
 from autotrade.coreutils.constant import Direction
 from autotrade.engine.event_engine import Event, EventEngine
 from autotrade.engine.event_engine import (
-                                    EVENT_TICK,
                                     EVENT_ORDER,
                                     EVENT_TRADE,
                                     EVENT_POSITION,
+                                    EVENT_POSITION_SNAPSHOT,
                                     EVENT_ACCOUNT,
-                                    EVENT_CONTRACT,
                                     EVENT_QUOTE
                                 )
 from autotrade.coreutils.object import (
     QuoteData,
     OrderData,
-    TickData,
     TradeData,
     PositionData,
     AccountData,
-    ContractData
 )
 import pandas as pd
 
@@ -28,16 +26,14 @@ class OmsBase:
     - 通过事件引擎接收更新。
     """
 
-    def __init__(self, event_engine: EventEngine = EventEngine()):
-        self.event_engine = event_engine
+    def __init__(self, event_engine: EventEngine | None = None):
+        self.event_engine = event_engine or EventEngine()
 
-        # 数据缓存
-        self.ticks: dict[str, TickData] = {}
+        # 交易执行和账户状态
         self.orders: dict[str, OrderData] = {}
         self.trades: dict[str, TradeData] = {}
         self.positions: dict[str, PositionData] = {}
         self.accounts: dict[str, AccountData] = {}
-        self.contracts: dict[str, ContractData] = {}
         self.quotes: dict[str, QuoteData] = {}
 
         self.active_orders: dict[str, OrderData] = {}
@@ -48,19 +44,16 @@ class OmsBase:
 
     def register_event(self):
         """注册事件监听"""
-        self.event_engine.register(EVENT_TICK, self.process_tick_event)
         self.event_engine.register(EVENT_ORDER, self.process_order_event)
         self.event_engine.register(EVENT_TRADE, self.process_trade_event)
-        self.event_engine.register(EVENT_POSITION, self.process_position_event)
+        self.event_engine.register(
+            EVENT_POSITION_SNAPSHOT,
+            self.process_position_snapshot_event,
+        )
         self.event_engine.register(EVENT_ACCOUNT, self.process_account_event)
-        self.event_engine.register(EVENT_CONTRACT, self.process_contract_event)
         self.event_engine.register(EVENT_QUOTE, self.process_quote_event)
 
     # ========== 事件处理 ==========
-    def process_tick_event(self, event: Event):
-        tick: TickData = event.data
-        self.ticks[tick.vt_symbol] = tick
-
     def process_order_event(self, event: Event):
         order: OrderData = event.data
         self.orders[order.vt_orderid] = order
@@ -71,19 +64,101 @@ class OmsBase:
 
     def process_trade_event(self, event: Event):
         trade: TradeData = event.data
+        if trade.vt_tradeid in self.trades:
+            return
         self.trades[trade.vt_tradeid] = trade
+        previous = deepcopy(self.positions.get(trade.symbol))
+        position = self._apply_trade_to_position(trade)
+        if position is not None:
+            self._after_trade_applied(trade, previous, position)
+            self.event_engine.put(Event(EVENT_POSITION, deepcopy(position)))
 
-    def process_position_event(self, event: Event):
-        position: PositionData = event.data
-        self.positions[position.symbol] = position
+    def _after_trade_applied(
+        self,
+        trade: TradeData,
+        previous: PositionData | None,
+        position: PositionData,
+    ) -> None:
+        """Subclass hook executed after the common position projection."""
+
+    def _apply_trade_to_position(self, trade: TradeData) -> PositionData | None:
+        """Project confirmed fills into one signed net position."""
+        if trade.direction not in {Direction.LONG, Direction.SHORT}:
+            return None
+
+        current = self.positions.get(trade.symbol)
+        old_volume = 0.0
+        old_price = 0.0
+        if current is not None:
+            old_volume = float(current.volume)
+            if current.direction == Direction.SHORT and old_volume > 0:
+                old_volume = -old_volume
+            old_price = float(current.price)
+
+        delta = (
+            abs(float(trade.volume))
+            if trade.direction == Direction.LONG
+            else -abs(float(trade.volume))
+        )
+        new_volume = old_volume + delta
+
+        if old_volume == 0 or old_volume * delta > 0:
+            new_price = (
+                float(trade.price)
+                if old_volume == 0
+                else (
+                    old_price * abs(old_volume)
+                    + float(trade.price) * abs(delta)
+                ) / abs(new_volume)
+            )
+        elif new_volume == 0:
+            new_price = 0.0
+        elif old_volume * new_volume > 0:
+            new_price = old_price
+        else:
+            new_price = float(trade.price)
+
+        position = PositionData(
+            gateway_name=trade.gateway_name,
+            symbol=trade.symbol,
+            exchange=trade.exchange,
+            direction=Direction.NET,
+            volume=new_volume,
+            price=new_price,
+            margin=0,
+        )
+        if new_volume == 0:
+            self.positions.pop(trade.symbol, None)
+        else:
+            self.positions[trade.symbol] = position
+        return position
+
+    def process_position_snapshot_event(self, event: Event):
+        """Accept broker snapshots only through the reconciliation input."""
+        position: PositionData = deepcopy(event.data)
+        if position.volume == 0:
+            self.positions.pop(position.symbol, None)
+        else:
+            self.positions[position.symbol] = position
+        self.event_engine.put(Event(EVENT_POSITION, deepcopy(position)))
+
+    def reconcile_positions(
+        self,
+        positions: list[PositionData],
+        *,
+        replace: bool = True,
+    ) -> None:
+        """Reconcile startup/reconnect broker positions, then publish results."""
+        if replace:
+            self.positions.clear()
+        for position in positions:
+            self.process_position_snapshot_event(
+                Event(EVENT_POSITION_SNAPSHOT, position)
+            )
 
     def process_account_event(self, event: Event):
         account: AccountData = event.data
         self.accounts[account.vt_accountid] = account
-
-    def process_contract_event(self, event: Event):
-        contract: ContractData = event.data
-        self.contracts[contract.vt_symbol] = contract
 
     def process_quote_event(self, event: Event):
         quote: QuoteData = event.data
@@ -94,9 +169,6 @@ class OmsBase:
             self.active_quotes.pop(quote.vt_quoteid)
 
     # ========== 查询接口 ==========
-    def get_tick(self, vt_symbol: str):
-        return self.ticks.get(vt_symbol)
-
     def get_order(self, vt_orderid: str):
         return self.orders.get(vt_orderid)
 
@@ -109,14 +181,8 @@ class OmsBase:
     def get_account(self, vt_accountid: str):
         return self.accounts.get(vt_accountid)
 
-    def get_contract(self, vt_symbol: str):
-        return self.contracts.get(vt_symbol)
-
     def get_quote(self, vt_quoteid: str):
         return self.quotes.get(vt_quoteid)
-
-    def get_all_ticks(self):
-        return list(self.ticks.values())
 
     def get_all_orders(self):
         return list(self.orders.values())
@@ -129,9 +195,6 @@ class OmsBase:
 
     def get_all_accounts(self):
         return list(self.accounts.values())
-
-    def get_all_contracts(self):
-        return list(self.contracts.values())
 
     def get_all_quotes(self):
         return list(self.quotes.values())
@@ -189,9 +252,10 @@ class OmsBase:
 
 
 class OmsMhi(OmsBase):
-    def __init__(self, event_engine: EventEngine = EventEngine()):
+    def __init__(self, event_engine: EventEngine | None = None):
         super().__init__(event_engine)
-    def process_position_event(self, event: Event):
+
+    def process_position_snapshot_event(self, event: Event):
         position: PositionData = event.data
         if position.symbol not in self.positions.keys():
             self.positions[position.symbol] = position
@@ -208,4 +272,16 @@ class OmsMhi(OmsBase):
             else:
                 old_position.volume = abs(new_position)
                 old_position.direction = Direction.LONG
+        current = self.positions.get(position.symbol)
+        if current is None:
+            current = PositionData(
+                gateway_name=position.gateway_name,
+                symbol=position.symbol,
+                exchange=position.exchange,
+                direction=Direction.NET,
+                volume=0,
+                price=0,
+                margin=0,
+            )
+        self.event_engine.put(Event(EVENT_POSITION, deepcopy(current)))
 

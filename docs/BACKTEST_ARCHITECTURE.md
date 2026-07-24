@@ -45,7 +45,7 @@ security_data_names  -> TimeSlice.security_updates
 valuation_data_names -> TimeSlice.valuation_updates
 ```
 
-Reader 不决定消费者，SecurityManager 和 AccountingManager 也不再扫描 Slice。
+Reader 不决定消费者，SecurityManager 和 BacktestOms 也不扫描 Slice。
 
 ### SecurityManager
 
@@ -57,18 +57,30 @@ SecurityManager 维护每个标的的唯一最新运行时对象：
 - `OptionContract`
 
 这些对象与 Bar、Tick、InstrumentState 一样定义在 `coreutils/object.py`；
-`autotrade/backtest/security_manager.py` 只保留创建、升级和更新对象的
+`autotrade/engine/security_manager.py` 只保留创建、升级和更新对象的
 `SecurityManager`。期货和期权合约本身就是对应资产的运行时 Security；
 Chain 直接引用这些 Contract，不再维护第二套轻量合约对象。
 
 InstrumentStateData 更新合约属性和生命周期；Bar、Tick、Quote 更新高频市场状态。
 其他模块只读取 Security，不维护合约参数副本。
 
-### AccountingManager
+### OmsBase 与 BacktestOms
 
-AccountingManager 直接消费 `valuation_updates`。交易发生时，它从对应 Security
-读取 multiplier、margin rate 和 commission rate，并同步给当前遗留 OMS 的计算
-接口；框架对外不再提供 `set_contracts`。
+`OmsBase` 是实盘和回测共用的订单、成交、持仓、账户和报价状态中心。它消费
+`EVENT_ORDER`、`EVENT_TRADE`、`EVENT_ACCOUNT`、`EVENT_QUOTE` 以及券商持仓快照；
+成交更新持仓后由 OMS 发布 `EVENT_POSITION`。
+
+`BacktestOms` 继承 `OmsBase`，只覆盖成交后的模拟账务 hook，并在 TimeSlice 末尾
+消费 `valuation_updates` 完成盯市。合约乘数、保证金率和手续费率始终直接读取共享
+的 SecurityManager，不保留第二份合约参数。
+
+### Recorder 与 Analyzer
+
+`BacktestRecorder` 是 `BacktestOms` 的内部协作者。当且仅当 TimeSlice 包含
+`valuation_updates` 时，OMS 才完成盯市、发布账户并立即记录快照；Tick 或其他非估值
+数据不会产生账户历史。Recorder 只读复制 OMS 和 SecurityManager 的权威状态，不参与
+资金或持仓计算。`PerformanceAnalyzer` 对 Recorder 的历史快照做纯统计，不持有运行时
+交易状态。
 
 ### Engine
 
@@ -85,7 +97,7 @@ SecurityManager
 -> Gateway before data
 -> Strategy
 -> Gateway after data
--> AccountingManager
+-> BacktestOms valuation + recorder snapshot
 ```
 
 Engine 不读取 DataFrame、不持有 Reader 或数据源配置，也不决定数据频率。

@@ -19,7 +19,7 @@ from autotrade.coreutils.object import (
     TradeData,
 )
 
-from autotrade.backtest.security_manager import SecurityManager
+from autotrade.engine.security_manager import SecurityManager
 from autotrade.coreutils.object import (
     Request,
     RequestState,

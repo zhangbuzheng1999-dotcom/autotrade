@@ -9,15 +9,26 @@ from threading import Thread
 from time import sleep
 from typing import Any
 
+EVENT_TIMER = "eTimer"
+EVENT_TICK = "eTick."  # compatibility only; market data uses EVENT_DATA
+EVENT_BAR = "eBar."  # compatibility only; market data uses EVENT_DATA
 EVENT_TRADE = "eTrade."
 EVENT_ORDER = "eOrder."
 EVENT_POSITION = "ePosition."
 EVENT_ACCOUNT = "eAccount."
-EVENT_CONTRACT = "eContract."
+EVENT_CONTRACT = "eContract."  # compatibility only; instrument data uses EVENT_DATA
+EVENT_QUOTE = "eQuote."
 EVENT_LOG = "eLog"
-EVENT_DATA = "event_data"  # data: Slice
+EVENT_DATA = "event_data"  # one market-data or instrument-state update
+EVENT_SLICE = "event_slice"  # strategy-visible live data or synchronized Slice
 EVENT_REQUEST = "event_request"  # data: Request
 EVENT_REQUEST_STATUS = "event_request_status"  # data: RequestStatus
+EVENT_POSITION_SNAPSHOT = "event_position_snapshot"  # broker reconciliation input
+EVENT_ORDER_REQ = "evt.order.req"
+EVENT_CANCEL_REQ = "evt.cancel.req"
+EVENT_MODIFY_REQ = "evt.modify.req"
+EVENT_ROLLOVER = "evt.rollover"
+EVENT_COMMAND = "cta_command"
 
 class Event:
     """

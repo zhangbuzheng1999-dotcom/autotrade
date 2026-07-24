@@ -5,7 +5,7 @@ import pandas as pd
 
 from autotrade.coreutils.constant import Exchange
 
-from autotrade.backtest.security_manager import SecurityManager
+from autotrade.engine.security_manager import SecurityManager
 from autotrade.coreutils.object import EquitySecurity, FutureContract
 from autotrade.backtest.data import (
     DataManager,

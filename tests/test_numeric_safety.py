@@ -7,11 +7,16 @@ import pandas as pd
 from autotrade.coreutils.constant import Direction, Exchange, OrderType
 from autotrade.coreutils.object import OrderRequest
 
-from autotrade.backtest.accounting_manager import AccountingManager
 from autotrade.backtest.backtest_gateway import Fill
 from autotrade.backtest.backtest_engine import BacktestEngine
-from autotrade.backtest.security_manager import SecurityManager
-from autotrade.coreutils.object import Slice, TradeBar
+from autotrade.backtest.performance_analyzer import PerformanceAnalyzer
+from autotrade.engine.security_manager import SecurityManager
+from autotrade.coreutils.object import (
+    Slice,
+    TimeSlice,
+    TradeBar,
+    ValuationUpdate,
+)
 from autotrade.backtest.data.pipeline import (
     DataRoutingConfig,
     _NamedData,
@@ -76,11 +81,11 @@ class NumericSafetyTests(unittest.TestCase):
             router.route([_NamedData("mark", data)])
 
     def test_intraday_annual_return_is_nan_instead_of_overflowing(self):
-        result = AccountingManager._calculate_annual_return(100, 200, 60)
+        result = PerformanceAnalyzer.calculate_annual_return(100, 200, 60)
         self.assertTrue(math.isnan(result))
 
     def test_extreme_annual_return_becomes_infinity_instead_of_overflowing(self):
-        result = AccountingManager._calculate_annual_return(
+        result = PerformanceAnalyzer.calculate_annual_return(
             1,
             1e100,
             timedelta(days=1).total_seconds(),
@@ -88,7 +93,7 @@ class NumericSafetyTests(unittest.TestCase):
         self.assertEqual(result, math.inf)
 
     def test_extreme_annual_loss_does_not_underflow_ratio(self):
-        result = AccountingManager._calculate_annual_return(
+        result = PerformanceAnalyzer.calculate_annual_return(
             1e308,
             1e-308,
             timedelta(days=365).total_seconds(),
@@ -117,6 +122,38 @@ class SliceDataTests(unittest.TestCase):
         self.assertTrue(slice_.has_data)
         self.assertTrue(slice_.contains_data("1m"))
         self.assertFalse(slice_.contains_data("5m"))
+
+    def test_backtest_records_only_slices_with_valuation_updates(self):
+        when = datetime(2024, 1, 1)
+        engine = BacktestEngine(logger=_QuietLogger())
+        empty = TimeSlice(time=when, slice=Slice(time=when))
+
+        engine.on_time_slice(empty)
+        self.assertFalse(engine.account_daily)
+
+        bar = TradeBar(
+            symbol="A",
+            time=when,
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+        )
+        valued = TimeSlice(
+            time=when,
+            slice=Slice(time=when),
+            valuation_updates=(
+                ValuationUpdate(
+                    symbol="A",
+                    time=when,
+                    price=1,
+                    source=bar,
+                ),
+            ),
+        )
+
+        engine.on_time_slice(valued)
+        self.assertEqual(len(engine.account_daily), 1)
 
 
 class _QuietLogger:

@@ -1,156 +1,215 @@
-from autotrade.coreutils.object import TradeData, AccountData, PositionData
-from autotrade.coreutils.constant import Direction
-from autotrade.backtest.backtest_event_engine import BacktestEventEngine
-from autotrade.engine.event_engine import Event
-from autotrade.engine.oms_engine import OmsBase
+"""Backtest account simulation built on the shared OMS state machine."""
+
+from __future__ import annotations
+
 from copy import deepcopy
+from typing import TYPE_CHECKING
+
+from autotrade.coreutils.constant import Direction
+from autotrade.coreutils.object import AccountData, PositionData, TradeData
+from autotrade.backtest.backtest_recorder import BacktestRecorder
+from autotrade.engine.event_engine import EVENT_ACCOUNT, Event
+from autotrade.engine.oms_engine import OmsBase
+
+if TYPE_CHECKING:
+    from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+    from autotrade.coreutils.object import TimeSlice
+    from autotrade.engine.security_manager import SecurityManager
 
 
 class BacktestOms(OmsBase):
-    """
-    回测专用 OMS（含保证金逻辑）
-    - 事件驱动：接收 Trade 事件更新仓位和资金
-    - 支持卖空、翻仓、均价计算、保证金管理
-    """
+    """Simulate broker accounting while reusing common OMS trade/position flow."""
 
-    def __init__(self, event_engine: BacktestEventEngine = BacktestEventEngine(), initial_cash: float = 1_000_000):
+    account_id = "BACKTEST"
+
+    def __init__(
+        self,
+        event_engine: "BacktestEventEngine",
+        *,
+        security_manager: "SecurityManager",
+        initial_cash: float = 1_000_000,
+        recorder: BacktestRecorder | None = None,
+    ) -> None:
+        self.security_manager = security_manager
+        self.recorder = recorder or BacktestRecorder()
+        self.initial_cash = float(initial_cash)
+        self.mark_prices: dict[str, float] = {}
+        self.unrealized_pnl_by_symbol: dict[str, float] = {}
+        self.realized_pnl_by_symbol: dict[str, float] = {}
+        self.turnover_by_symbol: dict[str, float] = {}
+        self.commission_by_symbol: dict[str, float] = {}
         super().__init__(event_engine)
 
-        self.gateway_name = 'BACKTEST'
+        account = AccountData("BACKTEST", accountid=self.account_id)
+        account.cash = self.initial_cash
+        account.available = self.initial_cash
+        account.equity = self.initial_cash
+        self._account_key = account.vt_accountid
+        self.accounts[self._account_key] = account
 
-        # 账户情况
-        self.accounts['BACKTEST'] = AccountData(self.gateway_name, accountid='BACKTEST')
-        self.accounts['BACKTEST'].cash = initial_cash
-        self.accounts['BACKTEST'].available = initial_cash
-        self.accounts['BACKTEST'].equity = initial_cash
+    @property
+    def account(self) -> AccountData:
+        return self.accounts[self._account_key]
 
-        # 仓位与资金
-        self.contracts_log = {}
-        self.trade_log: list[TradeData] = []
+    @property
+    def trade_log(self) -> list[TradeData]:
+        """Ordered compatibility view backed by the authoritative trade dict."""
+        return list(self.trades.values())
 
-        # 合约参数
-        self.sizes: dict[str, float] = {}
-        self.long_rates: dict[str, float] = {}
-        self.short_rates: dict[str, float] = {}
-        self.margin_rates: dict[str, float] = {}  # 保证金率
+    def _after_trade_applied(
+        self,
+        trade: TradeData,
+        previous: PositionData | None,
+        position: PositionData,
+    ) -> None:
+        security = self.security_manager.get(trade.symbol)
+        multiplier = float(security.multiplier if security is not None else 1)
+        commission_rate = self._commission_rate(security, trade.direction)
+        turnover = abs(float(trade.volume)) * float(trade.price) * multiplier
+        commission = turnover * commission_rate
 
-    def set_contract_params(
-            self, symbol: str, size: float = 1, long_rate: float = 0, short_rate: float = 0, margin_rate: float = 0
-    ):
-        """设置合约参数（含保证金率）"""
-        self.sizes[symbol] = size
-        self.long_rates[symbol] = long_rate
-        self.short_rates[symbol] = short_rate
-        self.margin_rates[symbol] = margin_rate
-
-    def process_trade_event(self, event: Event):
-        # 原生oms
-        trade: TradeData = event.data
-        self.trades[trade.vt_tradeid] = trade
-
-        symbol = trade.symbol
-        size = self.sizes.get(symbol, 1)
-        margin_rate = self.margin_rates.get(symbol, 0.1)
-        cost = trade.price * trade.volume * size
-        exchange = trade.exchange
-        commission = cost * (
-            self.long_rates.get(symbol, 0) if trade.direction == Direction.LONG else self.short_rates.get(symbol,
-                                                                                                          0))
-
-        pos = self.positions.setdefault(symbol,
-                                        PositionData(gateway_name=self.gateway_name, symbol=symbol, exchange=exchange,
-                                                     direction=Direction.NET, volume=0, price=0, margin=0))
-
-        # 无论开平都要扣手续费
-        self.accounts['BACKTEST'].cash -= commission
-
-        # 获取旧仓位
-        old_volume, old_price, old_margin = pos.volume, pos.price, pos.margin
-
-        # 新交易信息
-        new_volume = abs(trade.volume) if trade.direction == Direction.LONG else -abs(trade.volume)
-        new_price = trade.price
-        turnover = abs(new_volume) * new_price * size
-
+        old_volume = self._signed_volume(previous)
+        delta = (
+            abs(float(trade.volume))
+            if trade.direction == Direction.LONG
+            else -abs(float(trade.volume))
+        )
+        close_quantity = (
+            min(abs(old_volume), abs(delta))
+            if old_volume * delta < 0
+            else 0.0
+        )
         realized_pnl = 0.0
-
-        # 情况一：方向一致（加仓）
-        if old_volume * new_volume > 0:
-            volume = old_volume + new_volume
-            price = (old_price * abs(old_volume) + new_price * abs(new_volume)) / abs(volume)
-
-        # 情况二：方向相反（平仓或反手）
-        else:
-            close_qty = min(abs(old_volume), abs(new_volume))
+        if close_quantity and previous is not None:
             if old_volume > 0:
-                realized_pnl = (new_price - old_price) * close_qty * size
+                realized_pnl = (
+                    float(trade.price) - float(previous.price)
+                ) * close_quantity * multiplier
             else:
-                realized_pnl = (old_price - new_price) * close_qty * size
+                realized_pnl = (
+                    float(previous.price) - float(trade.price)
+                ) * close_quantity * multiplier
 
-            self.accounts['BACKTEST'].cash += realized_pnl
-            volume = old_volume + new_volume
-            if abs(new_volume) < abs(old_volume):  # 部分平仓，保持原均价
-                price = old_price
-            else:  # 完全反手，新开仓
-                price = new_price
+        account = self.account
+        account.cash += realized_pnl - commission
+        account.realized_pnl += realized_pnl
+        self.realized_pnl_by_symbol[trade.symbol] = (
+            self.realized_pnl_by_symbol.get(trade.symbol, 0.0)
+            + realized_pnl
+        )
+        self.turnover_by_symbol[trade.symbol] = (
+            self.turnover_by_symbol.get(trade.symbol, 0.0)
+            + turnover
+        )
+        self.commission_by_symbol[trade.symbol] = (
+            self.commission_by_symbol.get(trade.symbol, 0.0)
+            + commission
+        )
 
-        # 更新仓位
-        if volume != 0:
-            margin = abs(volume) * trade.price * size * margin_rate
-            pos.margin = margin
-            pos.volume = volume
-            pos.price = price
+        self.mark_prices[trade.symbol] = float(trade.price)
+        if position.volume == 0:
+            self.unrealized_pnl_by_symbol.pop(trade.symbol, None)
+        self._refresh_position_margins()
+        self._refresh_portfolio()
 
+    def on_timeslice(self, time_slice: "TimeSlice") -> bool:
+        """Settle and record only when the slice carries valuation data."""
+        if not time_slice.valuation_updates:
+            return False
+
+        for update in time_slice.valuation_updates:
+            self.mark_prices[update.symbol] = float(update.price)
+
+        self._mark_to_market()
+        self._refresh_position_margins()
+        self._refresh_portfolio()
+        self.publish_account()
+        self.recorder.snapshot(
+            time_slice.time,
+            self,
+            self.security_manager,
+        )
+        return True
+
+    @property
+    def account_daily(self):
+        return self.recorder.account_daily
+
+    @property
+    def position_daily(self):
+        return self.recorder.position_daily
+
+    @property
+    def contract_daily(self):
+        return self.recorder.contract_daily
+
+    def get_trade_log_df(self):
+        return self.recorder.get_trade_log_df(self)
+
+    def get_account_daily_df(self):
+        return self.recorder.get_account_daily_df()
+
+    def _mark_to_market(self) -> None:
+        active_symbols = set(self.positions)
+        for symbol in tuple(self.unrealized_pnl_by_symbol):
+            if symbol not in active_symbols:
+                del self.unrealized_pnl_by_symbol[symbol]
+
+        for symbol, position in self.positions.items():
+            security = self.security_manager.get(symbol)
+            multiplier = float(security.multiplier if security is not None else 1)
+            mark_price = self.mark_prices.get(symbol, float(position.price))
+            self.unrealized_pnl_by_symbol[symbol] = (
+                (mark_price - float(position.price))
+                * float(position.volume)
+                * multiplier
+            )
+
+    def _refresh_position_margins(self) -> None:
+        for symbol, position in self.positions.items():
+            security = self.security_manager.get(symbol)
+            if security is None:
+                position.margin = 0.0
+                continue
+            mark_price = self.mark_prices.get(symbol, float(position.price))
+            position.margin = (
+                abs(float(position.volume))
+                * mark_price
+                * float(security.multiplier)
+                * float(security.margin_rate)
+            )
+
+    def _refresh_portfolio(self) -> None:
+        account = self.account
+        account.margin = sum(
+            float(position.margin)
+            for position in self.positions.values()
+        )
+        account.unrealized_pnl = sum(self.unrealized_pnl_by_symbol.values())
+        account.equity = account.cash + account.unrealized_pnl
+        account.available = account.equity - account.margin
+
+    def publish_account(self) -> None:
+        self.event_engine.put(Event(EVENT_ACCOUNT, deepcopy(self.account)))
+
+    @staticmethod
+    def _signed_volume(position: PositionData | None) -> float:
+        if position is None:
+            return 0.0
+        volume = float(position.volume)
+        if position.direction == Direction.SHORT and volume > 0:
+            return -volume
+        return volume
+
+    @staticmethod
+    def _commission_rate(security, direction: Direction) -> float:
+        if security is None:
+            return 0.0
+        if direction == Direction.LONG:
+            rate = security.long_commission_rate
         else:
-            margin = 0
-            self.positions.pop(symbol, None)
+            rate = security.short_commission_rate
+        return float(security.commission_rate if rate is None else rate)
 
-        # 重新计算总保证金
-        self.accounts['BACKTEST'].margin = sum(p.margin for p in self.positions.values())
 
-        # 更新账户指标
-        self.accounts['BACKTEST'].realized_pnl += realized_pnl
-        self.accounts['BACKTEST'].equity = self.accounts['BACKTEST'].cash  # 暂不加浮盈
-        self.accounts['BACKTEST'].available = self.accounts['BACKTEST'].cash + self.accounts[
-            'BACKTEST'].unrealized_pnl - self.accounts['BACKTEST'].margin
-
-        # 更新contract指标
-        contract_info = self.contracts_log.setdefault(symbol, {"volume": 0, "margin": 0, "realized_pnl": 0.0,
-                                                               "unrealized_pnl": 0.0,
-                                                               "cost": 0.0,
-                                                               "turnover": 0.0, })
-        contract_info["volume"] = volume
-        contract_info["margin"] = margin
-        contract_info["realized_pnl"] += realized_pnl
-        contract_info["cost"] += cost
-        contract_info["turnover"] += turnover
-        # 如果平仓重置浮盈
-        if volume == 0:
-            contract_info["unrealized_pnl"] = 0
-        # 记录交易
-        self.trade_log.append(trade)
-
-    def get_contract_log(self):
-        return deepcopy(self.contracts_log)
-
-    def renew_unrealized_pnl(self, last_prices: dict[str, float]):
-        """总权益 = 可用现金 + 占用保证金 + 持仓浮盈"""
-        self.accounts['BACKTEST'].unrealized_pnl = 0.0
-        self.accounts['BACKTEST'].equity = self.accounts['BACKTEST'].cash
-        for symbol, pos in self.positions.items():
-            if pos.volume != 0:
-                size = self.sizes.get(symbol, 1)
-                last_price = last_prices.get(symbol, pos.price)
-                float_pnl = (last_price - pos.price) * pos.volume * size
-                self.accounts['BACKTEST'].unrealized_pnl += float_pnl
-                self.accounts['BACKTEST'].equity += float_pnl
-                self.accounts['BACKTEST'].available = (self.accounts['BACKTEST'].cash +
-                                                       self.accounts['BACKTEST'].unrealized_pnl - self.accounts[
-                                                           "BACKTEST"].margin)
-
-                # 更新contract指标
-                contract_info = self.contracts_log.get(symbol)
-                contract_info['unrealized_pnl'] = float_pnl
-
-    def get_trades(self) -> list[TradeData]:
-        return self.trade_log
+__all__ = ["BacktestOms"]

@@ -6,13 +6,14 @@ from autotrade.backtest.backtest_event_engine import (
     EVENT_DATA,
     EVENT_REQUEST,
     EVENT_REQUEST_STATUS,
+    EVENT_SLICE,
     BacktestEventEngine,
     Event,
 )
 from autotrade.coreutils.constant import Interval, Exchange, Direction, OrderType, OrderStatus
 from autotrade.coreutils.object import BarData, OrderData, TradeData, OrderRequest, ModifyRequest, CancelRequest, PositionData, \
-    LogData, Request, RequestStatus, RequestType, TickData
-from autotrade.engine.event_engine import EventEngine, EVENT_TICK, EVENT_ORDER, EVENT_TRADE, EVENT_BAR, EVENT_LOG, \
+    LogData, Request, RequestStatus, RequestType, Tick, TickData, TradeBar
+from autotrade.engine.event_engine import EventEngine, EVENT_ORDER, EVENT_TRADE, EVENT_LOG, \
     EVENT_ORDER_REQ, EVENT_CANCEL_REQ, EVENT_MODIFY_REQ, EVENT_POSITION
 from autotrade.backtest.backtest_event_engine import BacktestEventEngine
 
@@ -80,12 +81,10 @@ class StrategyBase:
     # ===================== Engine 直接回调：只入队 =====================
     def register_event(self):
         """注册事件监听"""
-        self.me.register(EVENT_TICK, self.process_tick_event)
         self.me.register(EVENT_ORDER, self.process_order_event)
         self.me.register(EVENT_TRADE, self.process_trade_event)
         self.me.register(EVENT_POSITION, self.process_position_event)
-        self.me.register(EVENT_BAR, self.process_bar_event)
-        self.me.register(EVENT_DATA, self.process_data_event)
+        self.me.register(EVENT_SLICE, self.process_data_event)
         self.me.register(EVENT_REQUEST_STATUS, self.process_request_status_event)
 
     def process_order_event(self, event: Event):
@@ -154,7 +153,13 @@ class StrategyBase:
         pass
 
     def on_data(self, slice_):
-        """Default Slice fallback: replay its primary bars to ``on_bar``."""
+        """Dispatch unified live data or replay the bars in a backtest Slice."""
+        if isinstance(slice_, (BarData, TradeBar)):
+            self.on_bar(slice_)
+            return
+        if isinstance(slice_, (TickData, Tick)):
+            self.on_tick(slice_)
+            return
         for bar in getattr(slice_, "bar_list", []):
             self.on_bar(bar)
 

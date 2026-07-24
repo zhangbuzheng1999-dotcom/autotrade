@@ -1,4 +1,4 @@
-"""Slice-based backtest engine built on top of autotrade's BacktestEngine."""
+"""Coordinator for the shared-security, shared-OMS backtest runtime."""
 
 from __future__ import annotations
 
@@ -13,12 +13,14 @@ from autotrade.engine.event_engine import (
     EVENT_ORDER_REQ,
 )
 
-from autotrade.backtest.accounting_manager import AccountingManager
+from autotrade.backtest.backtest_oms_engine import BacktestOms
+from autotrade.backtest.performance_analyzer import PerformanceAnalyzer
 from autotrade.backtest.backtest_gateway import BacktestSettings, BacktestGateway, BarFillModel, FillModel
-from autotrade.backtest.security_manager import SecurityManager
+from autotrade.engine.security_manager import SecurityManager
 from autotrade.coreutils.object import Slice, TimeSlice
 from autotrade.backtest.backtest_event_engine import (
     EVENT_DATA,
+    EVENT_SLICE,
     EVENT_LOG,
     Event,
     BacktestEventEngine,
@@ -41,7 +43,8 @@ class BacktestEngine:
         execution_data_name: str | None = None,
         security_manager: SecurityManager | None = None,
         fill_model: FillModel | None = None,
-        accounting_manager: AccountingManager | None = None,
+        oms: BacktestOms | None = None,
+        performance_analyzer: PerformanceAnalyzer | None = None,
         gateway: BacktestGateway | None = None,
     ):
         if event_engine is None:
@@ -62,17 +65,21 @@ class BacktestEngine:
             self.settings.execution_data_name = execution_data_name
         fill_model = fill_model or BarFillModel()
         self.security_manager = security_manager or SecurityManager()
-        self.accounting_manager = accounting_manager or AccountingManager(
+        self.security_manager.bind(self.event_engine, forward_data=False)
+        self.oms = oms or BacktestOms(
             self.event_engine,
             security_manager=self.security_manager,
+            initial_cash=self.initial_cash,
+        )
+        if self.oms.security_manager is not self.security_manager:
+            raise ValueError("oms must use the engine security_manager")
+        if self.oms.event_engine is not self.event_engine:
+            raise ValueError("oms must use the engine event_engine")
+        self.performance_analyzer = performance_analyzer or PerformanceAnalyzer(
             initial_cash=self.initial_cash,
             risk_free=self.risk_free,
             annual_days=self.annual_days,
         )
-        if self.accounting_manager.security_manager is not self.security_manager:
-            raise ValueError("accounting_manager must use the engine security_manager")
-        if self.accounting_manager.event_engine is not self.event_engine:
-            raise ValueError("accounting_manager must use the engine event_engine")
         self.gateway = gateway or BacktestGateway(
             gateway_name=self.gateway_name,
             event_engine=self.event_engine,
@@ -109,20 +116,16 @@ class BacktestEngine:
         self.gateway.cancel_order(event.data)
 
     @property
-    def oms(self):
-        return self.accounting_manager.oms
-
-    @property
     def account_daily(self):
-        return self.accounting_manager.account_daily
+        return self.oms.account_daily
 
     @property
     def contract_daily(self):
-        return self.accounting_manager.contract_daily
+        return self.oms.contract_daily
 
     @property
     def position_daily(self):
-        return self.accounting_manager.position_daily
+        return self.oms.position_daily
 
     def run(self, time_slices: Iterable[TimeSlice]):
         print("TimeSlice流式回测开始")
@@ -130,7 +133,7 @@ class BacktestEngine:
         self.processed_slice_count = 0
         for time_slice in time_slices:
             if time_slice.is_bootstrap:
-                self.security_manager.on_timeslice(time_slice)
+                self._push_security_updates(time_slice)
                 continue
             self.current_datetime = time_slice.time
             self.on_time_slice(time_slice)
@@ -138,22 +141,26 @@ class BacktestEngine:
 
         self.symbols = sorted(self.security_manager.securities)
 
-        if self.accounting_manager.account_daily:
-            self.backtest_res = self.accounting_manager.calculate_statistics()
+        if self.oms.account_daily:
+            self.backtest_res = self.calculate_statistics()
         else:
             self.backtest_res = {}
         print("TimeSlice回测结束")
 
     def on_time_slice(self, time_slice: TimeSlice):
         """Process one TimeSlice using inherited OMS/order event behavior."""
-        self.security_manager.on_timeslice(time_slice)
+        self._push_security_updates(time_slice)
         self.gateway.process_before_data(time_slice)
-        self._push_data_event(time_slice.slice)
+        self._push_slice_event(time_slice.slice)
         self.gateway.process_after_data(time_slice)
-        self.accounting_manager.on_timeslice(time_slice)
+        self.oms.on_timeslice(time_slice)
 
-    def _push_data_event(self, slice_: Slice):
-        self.event_engine.put(Event(EVENT_DATA, slice_))
+    def _push_security_updates(self, time_slice: TimeSlice) -> None:
+        for update in time_slice.security_updates:
+            self.event_engine.put(Event(EVENT_DATA, update))
+
+    def _push_slice_event(self, slice_: Slice):
+        self.event_engine.put(Event(EVENT_SLICE, slice_))
 
     def push_log_event(self, log_data: LogData):
         self.event_engine.put(Event(EVENT_LOG, log_data))
@@ -171,13 +178,13 @@ class BacktestEngine:
             self.logger.error(prefix)
 
     def calculate_statistics(self):
-        return self.accounting_manager.calculate_statistics()
+        return self.performance_analyzer.calculate(self.oms.account_daily)
 
     def get_trade_log_df(self):
-        return self.accounting_manager.get_trade_log_df()
+        return self.oms.get_trade_log_df()
 
     def get_account_daily_df(self):
-        return self.accounting_manager.get_account_daily_df()
+        return self.oms.get_account_daily_df()
 
     def performance_plot(self, *args, **kwargs):
         raise RuntimeError(

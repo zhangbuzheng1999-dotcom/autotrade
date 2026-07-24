@@ -1,12 +1,11 @@
 from abc import ABC, abstractmethod
 from autotrade.engine.event_engine import Event, EventEngine
 from autotrade.engine.event_engine import (
-    EVENT_TICK,
+    EVENT_DATA,
     EVENT_ORDER,
     EVENT_TRADE,
-    EVENT_POSITION,
+    EVENT_POSITION_SNAPSHOT,
     EVENT_ACCOUNT,
-    EVENT_CONTRACT,
     EVENT_LOG,
     EVENT_QUOTE,
 )
@@ -91,12 +90,9 @@ class BaseGateway(ABC):
 
 
     def on_tick(self, tick: TickData) -> None:
-        """
-        Tick event push.
-        Tick event of a specific vt_symbol is also pushed.
-        """
-        self.on_event(EVENT_TICK, tick)
-        self.on_event(EVENT_TICK + tick.vt_symbol, tick)
+        """Publish market data through the unified data event."""
+        self.on_event(EVENT_DATA, tick)
+        self.on_event(EVENT_DATA + tick.vt_symbol, tick)
 
     def on_trade(self, trade: TradeData) -> None:
         """
@@ -115,12 +111,8 @@ class BaseGateway(ABC):
         self.on_event(EVENT_ORDER + order.vt_orderid, order)
 
     def on_position(self, position: PositionData) -> None:
-        """
-        Position event push.
-        Position event of a specific vt_symbol is also pushed.
-        """
-        self.on_event(EVENT_POSITION, position)
-        self.on_event(EVENT_POSITION + position.vt_symbol, position)
+        """Publish a broker position snapshot for OMS reconciliation."""
+        self.on_event(EVENT_POSITION_SNAPSHOT, position)
 
     def on_account(self, account: AccountData) -> None:
         """
@@ -145,10 +137,9 @@ class BaseGateway(ABC):
         self.on_event(EVENT_LOG, log)
 
     def on_contract(self, contract: ContractData) -> None:
-        """
-        Contract event push.
-        """
-        self.on_event(EVENT_CONTRACT, contract)
+        """Publish instrument definitions through the unified data event."""
+        self.on_event(EVENT_DATA, contract)
+        self.on_event(EVENT_DATA + contract.vt_symbol, contract)
 
     def write_log(self, msg: str,level:LogLevel) -> None:
         """
