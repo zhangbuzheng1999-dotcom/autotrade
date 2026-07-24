@@ -203,6 +203,31 @@ price 表统一放在 ClickHouse。
 - 日线/周线：`ORDER BY (date, order_book_id)`
 - 分钟：`ORDER BY (datetime, order_book_id)`
 
+但分钟线这里现在已经是“按资产拆分语义”，不能再一概而论：
+
+- `index` minute price 仍然是纯 `datetime` 语义，不存 `trading_date`
+- `future / option` minute price 已恢复 `trading_date Nullable(Date)`
+
+当前真实实现是：
+
+- `future / option`
+  - minute 表同时存 `datetime` 和 `trading_date`
+  - `DB_ONLY` 的 `start_date / end_date` 按 `trading_date` 过滤
+  - 但 ClickHouse 物理排序字段仍然保持 `ORDER BY (datetime, order_book_id)`
+- `stock / etf / index`
+  - minute 表不存 `trading_date`
+  - minute 过滤与落库继续按 `datetime` 处理
+
+这样设计的原因是：
+
+- `future / option` 的源端 minute bars 自带 `trading_date`
+- 尤其 futures 夜盘会出现：
+  - `datetime = 前一自然日夜盘时间`
+  - `trading_date = 次一交易日`
+- 但分钟 bars 的真实时间轴主字段仍然是 `datetime`
+  - `trading_date` 是辅助查询字段
+  - 不是物理排序主字段
+
 ### 4.5 `option_greeks`
 
 `option_greeks` 当前也走 ClickHouse。
@@ -516,6 +541,27 @@ conda run -n rq_data python src/autotrade/data/ricequant/init_rq_data.py
 - ClickHouse databases
 - 所有 instrument / price / greeks / trading_dates 表
 
+如果需要“删库后完整重建”，当前已经有显式入口：
+
+```python
+from autotrade.coreutils.config import load_env
+from autotrade.data.ricequant.init_rq_data import rebuild_rq_databases
+
+load_env()
+rebuild_rq_databases()
+```
+
+这个入口会删除并重建以下 MySQL / ClickHouse database：
+
+- `rq_data`
+- `rq_stock_data`
+- `rq_etf_data`
+- `rq_future_data`
+- `rq_option_data`
+- `rq_index_data`
+
+注意这不是单纯 drop table，而是整套 rq 数据库重建。
+
 ### 9.2 各资产独立建表入口
 
 价格表目前都已经拆成“每个资产单独维护”：
@@ -546,6 +592,16 @@ conda run -n rq_data python src/autotrade/data/ricequant/init_rq_data.py
 - 再重新执行建表函数
 
 这点在 `stock/etf` 增加 `adjust_type` 时已经实际踩过。
+
+最近一次结构调整里，future / option minute 的处理方式已经改成：
+
+- 表里补回 `trading_date`
+- 但 `ORDER BY` 仍然保持 `ORDER BY (datetime, order_book_id)`
+
+也就是说：
+
+- 允许按 `trading_date` 查交易日语义
+- 但不把 `trading_date` 当成 minute 的物理排序主字段
 
 ## 10. ClickHouse 读写技术细节
 
@@ -749,6 +805,219 @@ conda run -n rq_data python src/autotrade/data/ricequant/init_rq_data.py
 - API 返回数据可落库
 - 回查能按 `adjust_type` 精确过滤
 - 三种复权模式会分别独立存储
+
+### 15.1 本次 `trading_date` 恢复后的额外验证
+
+本次又补了一轮更严格的确认，先直接看了源端 minute 返回，结论是：
+
+- `stock`：没有 `trading_date`
+- `etf`：没有 `trading_date`
+- `index`：没有 `trading_date`
+- `future`：有 `trading_date`
+- `option`：有 `trading_date`
+
+因此当前代码已经按资产拆分：
+
+- `future / option`
+  - minute 恢复 `trading_date`
+  - `DB_ONLY` 的 `start_date / end_date` 按 `trading_date` 过滤
+- `stock / etf / index`
+  - minute 继续只按 `datetime` 处理
+
+### 15.2 删库重建后的端到端验证
+
+这次不是在旧表上补列后验证，而是：
+
+- 先删掉全部 `rq_*` MySQL / ClickHouse 数据库
+- 再使用新的 `init_rq_data.py` 完整重建
+- 再重新跑 `SOURCE_ONLY -> persist -> DB_ONLY`
+
+验证窗口：
+
+- `2024-01-08` 到 `2024-01-12`
+
+验证方式：
+
+- 检查 source / DB 每天 bucket 分布
+- 检查首尾时间
+- 检查 source / DB 键集合是否一致
+- 检查共享数值列是否逐行一致
+
+本次验证结果：
+
+- `stock`
+  - `1d` 5 行
+  - `1m` 1200 行
+  - source / DB 键集合一致，值一致
+- `etf`
+  - `1d` 5 行
+  - `1m` 1200 行
+  - source / DB 键集合一致，值一致
+- `index`
+  - `1d` 5 行
+  - `1m` 1200 行
+  - source / DB 键集合一致，值一致
+- `future A2405`
+  - `1d` 5 行
+  - `1m` 1725 行
+  - source / DB 键集合一致，值一致
+  - `trading_date` 分桶正确保留夜盘归属
+  - 例如 `2024-01-10` 交易日对应：
+    - `2024-01-09 21:01:00 -> 2024-01-10 15:00:00`
+- `option 10005765`
+  - `1d` 5 行
+  - `1m` 1200 行
+  - source / DB 键集合一致，值一致
+
+结论：
+
+- 当前重建后的库结构与代码逻辑一致
+- `future / option` 的 minute `trading_date` 恢复方案已经真实跑通
+- 同时仍保留 `datetime` 作为 minute 表的物理排序主字段
+
+### 15.3 本次 minute healthy check 扩展
+
+这次又把 `healthy_check.py` 从“只支持 `1d` 缺失检查”扩成了“支持 minute 完整性检查”。
+
+#### 15.3.1 当前 minute healthy check 的实现口径
+
+minute 检查不再像 `1d` 那样先推理论存续区间再逐日对账，而是：
+
+1. 如果显式传了 `order_book_ids`
+   - 不再先查基础信息判断“这天是否应存在”
+   - 直接依赖 `rqdatac.get_trading_periods(...)`
+   - 因为不存在 / 当天无交易时段的合约，米筐会直接不返回
+
+2. 先对 `get_trading_periods(...)` 返回结果做展开
+   - 得到：
+     - `date`
+     - `time`
+     - `order_book_id`
+
+3. 再查本地 DB minute 数据
+   - `future / option`
+     - 用 `trading_date + time + order_book_id` 对比
+   - `stock / etf / index`
+     - 用 `datetime.date + time + order_book_id` 对比
+
+4. 只要缺任意一分钟 / 任意一个 bar
+   - 就把整个 `(trade_date, order_book_id)` 标记为缺失
+   - 默认不返回具体缺失的分钟点
+
+#### 15.3.2 当前已补的 minute healthy check 函数
+
+代码位置：
+
+- `src/autotrade/data/ricequant/healthy_check.py`
+
+当前已经有：
+
+- `fut_1m_healthy_check(...)`
+- `opt_1m_healthy_check(...)`
+- `stock_1m_healthy_check(...)`
+- `index_1m_healthy_check(...)`
+- `etf_1m_healthy_check(...)`
+
+虽然函数名保留了 `1m`，但现在都已经支持传：
+
+- `1m`
+- `5m`
+- `15m`
+- `30m`
+- `60m`
+
+#### 15.3.3 trading period 展开规则
+
+现在的 `expand_trading_periods_to_time_rows(...)` 已支持 minute 频率展开：
+
+- `1m`
+- `5m`
+- `15m`
+- `30m`
+- `60m`
+
+其中：
+
+- `1m`
+  - 直接逐分钟展开
+- `5m / 15m / 30m`
+  - 按“bar 结束时刻”生成
+  - 起点因为 trading period 是 `xx:01` / `xx:31` 这类 minute，所以第一根 bar 会落到：
+    - `5m` -> `xx:05`
+    - `15m` -> `xx:15`
+    - `30m` -> `xx:30`
+  - 必要时会补 segment end
+
+#### 15.3.4 `future 60m` 的特殊规则
+
+`future 60m` 不能直接沿用通用的 segment 展开规则。
+
+实测发现：
+
+- 通用规则会把 `09:01-10:15` 展开出 `10:15`
+- 也会把 `13:31-15:00` 展开出 `14:30`
+
+但米筐真实 `get_price(..., frequency='60m')` 返回并不是这样。
+
+例如：
+
+- `A2405 / 2024-01-10`
+  - 真实 `60m`：
+    - `22:00, 23:00, 10:00, 11:00, 11:30, 14:00, 15:00`
+- `AU888 / 2026-02-12`
+  - 真实 `60m`：
+    - `22:00, 23:00, 00:00, 01:00, 02:00, 02:30, 10:00, 11:00, 11:30, 14:00, 15:00`
+
+因此当前代码已经单独补了：
+
+- `expand_future_60m_trading_periods_to_time_rows(...)`
+
+并且只让 `future + 60m` 走这条特殊展开逻辑，其它资产和频率继续走通用规则。
+
+#### 15.3.5 本次 minute healthy check 的实测验证
+
+本次在 `rq_data` 环境下，按下面这组样本做了：
+
+- `SOURCE_ONLY + persist=True`
+- `DB_ONLY`
+- `minute healthy check`
+
+样本：
+
+- `future`: `A2405`
+- `option`: `10005765`
+- `stock`: `000001.XSHE`
+- `index`: `000300.XSHG`
+- `etf`: `510050.XSHG`
+
+频率：
+
+- `1m`
+- `5m`
+- `15m`
+- `30m`
+- `60m`
+
+最终结果：
+
+- `future`
+  - `1m / 5m / 15m / 30m / 60m` 全部返回 `{}` 
+- `option`
+  - `1m / 5m / 15m / 30m / 60m` 全部返回 `{}` 
+- `stock`
+  - `1m / 5m / 15m / 30m / 60m` 全部返回 `{}` 
+- `index`
+  - `1m / 5m / 15m / 30m / 60m` 全部返回 `{}` 
+- `etf`
+  - `1m / 5m / 15m / 30m / 60m` 全部返回 `{}`
+
+结论：
+
+- 当前 minute healthy check 已经覆盖：
+  - `future / option / stock / index / etf`
+- 当前 minute healthy check 已经实测覆盖：
+  - `1m / 5m / 15m / 30m / 60m`
+- 并且 `future 60m` 的特殊切桶规则也已对齐米筐真实返回
 
 ## 16. 当前已知约束
 

@@ -1,0 +1,62 @@
+TRADE_COLUMNS = [
+    "trade_id",
+    "account",
+    "book_name",
+    "strategy",
+    "opt_symbol",
+    "trade_date",
+    "trade_time",
+    "order_book_id",
+    "asset_type",
+    "side",
+    "offset",
+    "qty",
+    "price",
+    "multiplier",
+    "fee",
+    "currency",
+    "remark",
+]
+
+POSITION_COLUMNS = [
+    "account",
+    "book_name",
+    "strategy",
+    "opt_symbol",
+    "order_book_id",
+    "asset_type",
+    "qty",
+    "avg_cost",
+    "cost_basis",
+    "last_trade_date",
+    "last_trade_time",
+    "last_price",
+    "market_value",
+    "unrealized_pnl",
+]
+
+PRICE_COLUMNS = [
+    "date",
+    "order_book_id",
+    "close_price",
+]
+
+EQUITY_COLUMNS = [
+    "account",
+    "book_name",
+    "strategy",
+    "opt_symbol",
+    "date",
+    "realized_pnl",
+    "unrealized_pnl",
+    "daily_pnl",
+    "fee",
+    "realized_pnl_cum",
+    "pnl_total_cum",
+    "fee_cum",
+    "cash",
+    "market_value",
+    "nav",
+    "gross_exposure",
+    "net_exposure",
+]

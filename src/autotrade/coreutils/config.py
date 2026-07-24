@@ -160,6 +160,34 @@ class _ClickHouseInfoProxy:
         raise AttributeError(name)
 
 
+class _MongoInfoProxy:
+    """
+    Dynamic proxy for Mongo configuration.
+    Always reflects latest environment variables.
+    """
+
+    def __getattr__(self, name: str):
+        load_env()
+
+        mapping = {
+            "host": ("MONGO_HOST", "127.0.0.1"),
+            "port": ("MONGO_PORT", 27017),
+            "user": ("MONGO_USER", ""),
+            "password": ("MONGO_PASSWORD", ""),
+            "database": ("MONGO_DATABASE", ""),
+        }
+
+        if name == "port":
+            env_key, default = mapping[name]
+            return _get_int_env(env_key, default)
+
+        if name in mapping:
+            env_key, default = mapping[name]
+            return os.getenv(env_key, default)
+
+        raise AttributeError(name)
+
+
 class _ServerJiangProxy:
     def __getattr__(self, name: str):
         load_env()
@@ -231,6 +259,7 @@ class _TushareProxy:
 # ===================== 对外稳定 API（兼容旧代码） =====================
 DatabaseInfo = _DatabaseInfoProxy()
 ClickHouseInfo = _ClickHouseInfoProxy()
+MongoInfo = _MongoInfoProxy()
 serverjiang = _ServerJiangProxy()
 LinuxServer = _LinuxServerProxy()
 FutuInfo = _FutuInfoProxy()
@@ -240,6 +269,7 @@ __all__ = [
     "load_env",
     "DatabaseInfo",
     "ClickHouseInfo",
+    "MongoInfo",
     "serverjiang",
     "LinuxServer",
     "FutuInfo",
