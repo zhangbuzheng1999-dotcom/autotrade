@@ -23,12 +23,7 @@ from autotrade.coreutils.object import (
     TickData,
     TradeBar,
 )
-from autotrade.engine.event_engine import (
-    EVENT_DATA,
-    EVENT_SLICE,
-    Event,
-    EventEngine,
-)
+from autotrade.engine.event_engine import EVENT_DATA, Event, EventEngine
 
 if TYPE_CHECKING:
     from autotrade.coreutils.object import TimeSlice
@@ -40,34 +35,35 @@ class SecurityManager:
     def __init__(
         self,
         event_engine: EventEngine | None = None,
-        *,
-        forward_data: bool = True,
     ) -> None:
         self.event_engine = event_engine
-        self.forward_data = forward_data
         self.securities: dict[str, Security] = {}
         if event_engine is not None:
-            self.bind(event_engine, forward_data=forward_data)
+            self.bind(event_engine)
 
     def bind(
         self,
         event_engine: EventEngine,
-        *,
-        forward_data: bool | None = None,
     ) -> None:
         """Bind the shared manager to one data event stream."""
         if self.event_engine is not None and self.event_engine is not event_engine:
             self.event_engine.unregister(EVENT_DATA, self.process_data_event)
         self.event_engine = event_engine
-        if forward_data is not None:
-            self.forward_data = forward_data
         event_engine.register(EVENT_DATA, self.process_data_event)
+
+    def unregister(self) -> None:
+        if self.event_engine is not None:
+            self.event_engine.unregister(EVENT_DATA, self.process_data_event)
+
+    def start(self) -> None:
+        """Lifecycle compatibility hook."""
+
+    def stop(self) -> None:
+        self.unregister()
 
     def process_data_event(self, event: Event) -> None:
         """Consume the single public market/instrument data event."""
         self.on_data(event.data)
-        if self.forward_data and self.event_engine is not None:
-            self.event_engine.put(Event(EVENT_SLICE, event.data))
 
     def add(
         self,
@@ -114,15 +110,16 @@ class SecurityManager:
             )
             return
         if isinstance(data, TickData):
+            has_quote = data.bid_price_1 > 0 or data.ask_price_1 > 0
             data = Tick(
                 symbol=data.symbol,
                 exchange=data.exchange,
                 time=data.datetime,
-                tick_type="quote",
+                tick_type="quote" if has_quote else "trade",
                 price=data.last_price,
                 quantity=data.last_volume,
-                bid=data.bid_price_1,
-                ask=data.ask_price_1,
+                bid=data.bid_price_1 if data.bid_price_1 > 0 else None,
+                ask=data.ask_price_1 if data.ask_price_1 > 0 else None,
                 bid_size=data.bid_volume_1,
                 ask_size=data.ask_volume_1,
                 metadata={"legacy_source": data},

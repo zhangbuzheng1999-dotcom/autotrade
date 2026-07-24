@@ -1,219 +1,60 @@
-"""Slice-aware gateway with FillModel-based matching."""
+"""Simulated broker facade for backtest execution and accounting."""
 
 from __future__ import annotations
 
 import math
 import uuid
-from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
 
-from autotrade.coreutils.constant import Direction, LogLevel, OrderStatus, OrderType
+from autotrade.backtest.account_ledger import AccountLedger
+from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+from autotrade.backtest.backtest_event_publisher import BacktestEventPublisher
+from autotrade.backtest.backtest_order_book import (
+    RequestRejected,
+    SimulatedOrderBook,
+)
+from autotrade.backtest.backtest_recorder import BacktestRecorder
+from autotrade.backtest.commission_model import CommissionModel
+from autotrade.backtest.margin_model import MarginModel
+from autotrade.backtest.matching_engine import (
+    BacktestSettings,
+    BarFillModel,
+    Fill,
+    FillContext,
+    FillModel,
+    MatchingEngine,
+    UnsupportedOrderType,
+)
+from autotrade.coreutils.constant import LogLevel, OrderStatus
 from autotrade.coreutils.object import (
     CancelRequest,
     LogData,
     ModifyRequest,
     OrderData,
     OrderRequest,
-    TradeData,
-)
-
-from autotrade.engine.security_manager import SecurityManager
-from autotrade.coreutils.object import (
     Request,
     RequestState,
     RequestStatus,
     RequestType,
-    Slice,
     TimeSlice,
-    TradeBar,
+    TradeData,
 )
-from autotrade.backtest.backtest_event_engine import (
-    EVENT_LOG,
-    EVENT_ORDER,
+from autotrade.engine.event_engine import (
+    COMMAND_ACCOUNT_VALUATION,
+    COMMAND_MARKET_AFTER,
+    COMMAND_MARKET_BEFORE,
+    COMMAND_ORDER_CANCEL,
+    COMMAND_ORDER_MODIFY,
+    COMMAND_ORDER_SUBMIT,
     EVENT_REQUEST,
-    EVENT_REQUEST_STATUS,
-    EVENT_TRADE,
     Event,
-    BacktestEventEngine,
+    Message,
 )
-
-if TYPE_CHECKING:
-    from autotrade.coreutils.object import Security
-
-
-@dataclass(slots=True)
-class BacktestSettings:
-    cheat_on_close: bool = False
-    market_fill_price: str = "next_open"
-    stop_limit_same_bar: str = "conservative"
-    execution_data_name: str | None = None
-
-
-@dataclass(slots=True)
-class FillContext:
-    time: datetime
-    order: OrderData
-    security: "Security"
-    slice: Slice
-    securities: SecurityManager
-    settings: BacktestSettings
-
-
-@dataclass(frozen=True, slots=True)
-class Fill:
-    order_id: str
-    symbol: str
-    price: float
-    quantity: float
-    time: datetime
-
-
-@dataclass(slots=True)
-class _GatewayEventPublisher:
-    event_engine: BacktestEventEngine
-
-    def on_order(self, order: OrderData) -> None:
-        self.event_engine.put(Event(EVENT_ORDER, deepcopy(order)))
-
-    def on_trade(self, trade) -> None:
-        self.event_engine.put(Event(EVENT_TRADE, deepcopy(trade)))
-
-    def push_log_event(self, log_data: LogData) -> None:
-        self.event_engine.put(Event(EVENT_LOG, log_data))
-
-    def on_request_status(self, status: RequestStatus) -> None:
-        self.event_engine.put(Event(EVENT_REQUEST_STATUS, status))
-
-
-class FillModel:
-    """Return at most one full fill for the order's remaining quantity."""
-
-    def fill(self, parameters: FillContext) -> Fill | None:
-        order = parameters.order
-        if order.type == OrderType.MARKET:
-            return self.market_fill(parameters)
-        if order.type == OrderType.LIMIT:
-            return self.limit_fill(parameters)
-        if order.type == OrderType.STP_MKT:
-            return self.stop_market_fill(parameters)
-        if order.type == OrderType.STP_LMT:
-            return self.stop_limit_fill(parameters)
-        raise UnsupportedOrderType(order.type)
-
-    def market_fill(self, parameters: FillContext) -> Fill | None:
-        return None
-
-    def limit_fill(self, parameters: FillContext) -> Fill | None:
-        return None
-
-    def stop_market_fill(self, parameters: FillContext) -> Fill | None:
-        return None
-
-    def stop_limit_fill(self, parameters: FillContext) -> Fill | None:
-        return None
-
-
-class BarFillModel(FillModel):
-    """Conservative bar-only fill model."""
-
-    def market_fill(self, parameters: FillContext) -> Fill | None:
-        order = parameters.order
-        bar = _current_trade_bar(parameters)
-        if bar is None:
-            return None
-
-        same_time = order.datetime == parameters.time
-        if same_time and not parameters.settings.cheat_on_close:
-            return None
-
-        if same_time and parameters.settings.cheat_on_close:
-            price = bar.close
-        elif parameters.settings.market_fill_price == "next_close":
-            price = bar.close
-        else:
-            price = bar.open
-
-        return _full_fill(order, price, parameters.time)
-
-    def limit_fill(self, parameters: FillContext) -> Fill | None:
-        order = parameters.order
-        bar = _current_trade_bar(parameters)
-        if bar is None or order.datetime == parameters.time:
-            return None
-        if order.direction == Direction.LONG and bar.low <= order.price:
-            return _full_fill(order, min(bar.open, order.price), parameters.time)
-        if order.direction == Direction.SHORT and bar.high >= order.price:
-            return _full_fill(order, max(bar.open, order.price), parameters.time)
-        return None
-
-    def stop_market_fill(self, parameters: FillContext) -> Fill | None:
-        order = parameters.order
-        bar = _current_trade_bar(parameters)
-        if bar is None or order.datetime == parameters.time:
-            return None
-        if order.direction == Direction.LONG and bar.high >= order.trigger_price:
-            return _full_fill(order, max(order.trigger_price, bar.open), parameters.time)
-        if order.direction == Direction.SHORT and bar.low <= order.trigger_price:
-            return _full_fill(order, min(order.trigger_price, bar.open), parameters.time)
-        return None
-
-    def stop_limit_fill(self, parameters: FillContext) -> Fill | None:
-        order = parameters.order
-        bar = _current_trade_bar(parameters)
-        if bar is None or order.datetime == parameters.time:
-            return None
-
-        stop_triggered = bool(getattr(order, "stop_triggered", False))
-        triggered_this_bar = False
-
-        if not stop_triggered:
-            if order.direction == Direction.LONG and bar.high >= order.trigger_price:
-                stop_triggered = True
-                triggered_this_bar = True
-            elif order.direction == Direction.SHORT and bar.low <= order.trigger_price:
-                stop_triggered = True
-                triggered_this_bar = True
-
-        if not stop_triggered:
-            return None
-
-        setattr(order, "stop_triggered", True)
-
-        if triggered_this_bar and parameters.settings.stop_limit_same_bar == "conservative":
-            return None
-
-        return self.limit_fill(parameters)
-
-
-def _current_trade_bar(parameters: FillContext) -> TradeBar | None:
-    return parameters.slice.get_bar(
-        parameters.order.symbol,
-        data_name=parameters.settings.execution_data_name,
-    )
-
-
-def _full_fill(order: OrderData, price: float, time: datetime) -> Fill | None:
-    quantity = max(float(order.volume) - float(order.traded), 0.0)
-    if quantity <= 0:
-        return None
-    return Fill(
-        order_id=order.orderid,
-        symbol=order.symbol,
-        price=price,
-        quantity=quantity,
-        time=time,
-    )
-
-
-class UnsupportedOrderType(Exception):
-    def __init__(self, order_type: OrderType):
-        super().__init__(f"Unsupported order type: {order_type}")
+from autotrade.engine.security_manager import SecurityManager
 
 
 class BacktestGateway:
-    """Gateway that keeps order state and delegates matching to FillModel."""
+    """Facade that simulates broker order, fill, position, and account reports."""
 
     def __init__(
         self,
@@ -223,25 +64,126 @@ class BacktestGateway:
         fill_model: FillModel | None = None,
         settings: BacktestSettings | None = None,
         security_manager: SecurityManager | None = None,
-    ):
+        initial_cash: float = 1_000_000,
+        commission_model: CommissionModel | None = None,
+        margin_model: MarginModel | None = None,
+        recorder: BacktestRecorder | None = None,
+        clock=None,
+    ) -> None:
         self.gateway_name = gateway_name
-        self.publisher = _GatewayEventPublisher(event_engine)
-        self.active_orders: dict[str, dict[str, OrderData]] = {}
-        self.pending_orders: dict[str, dict[str, OrderData]] = {}
-        self.current_date = datetime.today()
         self.event_engine = event_engine
-        self.fill_model = fill_model or BarFillModel()
-        self.settings = settings or BacktestSettings()
         self.security_manager = security_manager or SecurityManager()
+        self.settings = settings or BacktestSettings()
+        self.clock = clock
+        self.current_date = datetime.min
+
+        self.publisher = BacktestEventPublisher(event_engine)
+        self.order_book = SimulatedOrderBook()
+        self.matching_engine = MatchingEngine(
+            fill_model=fill_model or BarFillModel(),
+            settings=self.settings,
+            security_manager=self.security_manager,
+        )
+        self.account_ledger = AccountLedger(
+            initial_cash=initial_cash,
+            security_manager=self.security_manager,
+            commission_model=commission_model,
+            margin_model=margin_model,
+        )
+        self.recorder = recorder or BacktestRecorder()
         self.register_event()
+
+    def publish_initial_state(self) -> None:
+        """Publish broker state after all shared consumers have been installed."""
+        self.publisher.account(self.account_ledger.account)
+
+    @property
+    def active_orders(self):
+        """Compatibility view; order state is owned by SimulatedOrderBook."""
+        return self.order_book.active_orders
+
+    @property
+    def pending_orders(self):
+        return self.order_book.pending_orders
+
+    @property
+    def fill_model(self):
+        return self.matching_engine.fill_model
 
     def register_event(self) -> None:
         self.event_engine.register(EVENT_REQUEST, self.process_request_event)
+        for name, handler in self._execution_routes:
+            self.event_engine.register_command("execution", name, handler)
+        for name, handler in self._simulation_routes:
+            self.event_engine.register_command("simulated_broker", name, handler)
+
+    def unregister_event(self) -> None:
+        self.event_engine.unregister(EVENT_REQUEST, self.process_request_event)
+        for name, handler in self._execution_routes:
+            self.event_engine.unregister_command("execution", name, handler)
+        for name, handler in self._simulation_routes:
+            self.event_engine.unregister_command("simulated_broker", name, handler)
+
+    @property
+    def _execution_routes(self):
+        return (
+            (COMMAND_ORDER_SUBMIT, self.process_order_command),
+            (COMMAND_ORDER_CANCEL, self.process_cancel_command),
+            (COMMAND_ORDER_MODIFY, self.process_modify_command),
+        )
+
+    @property
+    def _simulation_routes(self):
+        return (
+            (COMMAND_MARKET_BEFORE, self.process_before_command),
+            (COMMAND_MARKET_AFTER, self.process_after_command),
+            (COMMAND_ACCOUNT_VALUATION, self.process_valuation_command),
+        )
+
+    def process_order_command(self, message: Message) -> None:
+        self._process_routed_request(message, RequestType.ORDER)
+
+    def process_cancel_command(self, message: Message) -> None:
+        self._process_routed_request(message, RequestType.CANCEL)
+
+    def process_modify_command(self, message: Message) -> None:
+        self._process_routed_request(message, RequestType.MODIFY)
+
+    def _process_routed_request(
+        self,
+        message: Message,
+        request_type: RequestType,
+    ) -> None:
+        self.process_request_event(
+            Event(
+                EVENT_REQUEST,
+                Request(
+                    request_type,
+                    message.data,
+                    request_id=message.message_id,
+                    source=message.source,
+                ),
+            )
+        )
+
+    def process_before_command(self, message: Message) -> None:
+        self.process_before_data(message.data)
+
+    def process_after_command(self, message: Message) -> None:
+        self.process_after_data(message.data)
+
+    def process_valuation_command(self, message: Message) -> None:
+        self.process_valuation(message.data)
 
     def process_request_event(self, event: Event) -> None:
         request = event.data
         if not isinstance(request, Request):
-            self.write_log(LogData("[BacktestGateway] EVENT_REQUEST data must be Request", LogLevel.ERROR))
+            self.write_log(
+                LogData(
+                    "[BacktestGateway] EVENT_REQUEST data must be Request",
+                    LogLevel.ERROR,
+                )
+            )
             return
         if request.type not in {
             RequestType.ORDER,
@@ -249,7 +191,6 @@ class BacktestGateway:
             RequestType.CANCEL,
         }:
             return
-
         try:
             order = self._handle_request(request)
         except RequestRejected as exc:
@@ -291,7 +232,7 @@ class BacktestGateway:
         *,
         resource_id: str | None = None,
     ) -> None:
-        self.publisher.on_request_status(
+        self.publisher.request_status(
             RequestStatus(
                 request=request,
                 state=state,
@@ -301,161 +242,81 @@ class BacktestGateway:
             )
         )
 
-    def send_order(self, req: OrderRequest) -> OrderData:
-        orderid = uuid.uuid4().hex
-        order = req.create_order_data(orderid, self.gateway_name)
+    def send_order(self, request: OrderRequest) -> OrderData:
+        order = request.create_order_data(uuid.uuid4().hex, self.gateway_name)
         order.datetime = self.current_date
         order.status = OrderStatus.PENDING
-
-        self._ensure_symbol(order.symbol)
         self.security_manager.add(order.symbol)
-        self.pending_orders[order.symbol][orderid] = order
+        self.order_book.submit(order)
         return order
 
-    def cancel_order(self, req: CancelRequest) -> OrderData:
-        order = self._find_order(req.symbol, req.orderid)
-        if order is None:
-            raise RequestRejected(f"撤单失败，订单不存在: {req.orderid}")
+    def cancel_order(self, request: CancelRequest) -> OrderData:
+        return self.order_book.cancel(request, self.current_date)
 
-        if order.status in {OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED}:
-            raise RequestRejected(f"撤单失败，订单不可撤销: {req.orderid}")
-
-        self._pop_order(req.symbol, req.orderid)
-        order.status = OrderStatus.ALLCANCELLED
-        order.datetime = self.current_date
-        return order
-
-    def modify_order(self, req: ModifyRequest) -> OrderData:
-        order = self._find_order(req.symbol, req.orderid)
-        if order is None:
-            raise RequestRejected(f"修改失败，订单不存在: {req.orderid}")
-
-        if order.status in {OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED, OrderStatus.PARTCANCELLED}:
-            raise RequestRejected(f"修改失败，订单不可修改: {req.orderid}")
-
-        if req.qty <= order.traded:
-            raise RequestRejected(f"修改失败，新订单总量必须大于已成交数量: {req.orderid}")
-
-        self._pop_order(req.symbol, req.orderid)
-        execution_status = order.status
-        order.price = req.price
-        order.volume = req.qty
-        order.trigger_price = req.trigger_price
-        order.datetime = self.current_date
-        order.status = execution_status
-        setattr(order, "stop_triggered", False)
-        self.pending_orders[order.symbol][order.orderid] = order
-        return order
+    def modify_order(self, request: ModifyRequest) -> OrderData:
+        return self.order_book.modify(request, self.current_date)
 
     def process_before_data(self, time_slice: TimeSlice) -> None:
-        """Process resting orders before strategy sees the current Slice."""
-        slice_ = time_slice.slice
         self.current_date = time_slice.time
-        self._activate_pending_orders(time_slice.time)
-        self._scan_active_orders(time_slice)
+        for order in self.order_book.activate(time_slice.time):
+            self.on_order(order)
+        self._match(time_slice)
 
     def process_after_data(self, time_slice: TimeSlice) -> None:
-        """Process current-Slice requests after strategy code returns."""
         self.current_date = time_slice.time
         if not self.settings.cheat_on_close:
             return
+        for order in self.order_book.activate(
+            time_slice.time,
+            include_current=True,
+        ):
+            self.on_order(order)
+        self._match(time_slice, same_time_only=True)
 
-        self._activate_pending_orders(time_slice.time, include_current=True)
-        self._scan_active_orders(time_slice, same_time_only=True)
-
-    def _activate_pending_orders(self, now: datetime, *, include_current: bool = False) -> None:
-        for symbol, orders in list(self.pending_orders.items()):
-            self._ensure_symbol(symbol)
-            for orderid, order in list(orders.items()):
-                if order.datetime is None:
-                    should_activate = True
-                elif include_current:
-                    should_activate = order.datetime <= now
-                else:
-                    should_activate = order.datetime < now
-
-                if not should_activate:
-                    continue
-
-                order.status = (
-                    OrderStatus.PARTTRADED if float(order.traded) > 0 else OrderStatus.NOTTRADED
-                )
-                order.datetime = now if include_current else order.datetime
-                self.active_orders[symbol][orderid] = order
-                del orders[orderid]
-                self.on_order(order)
-
-    def _scan_active_orders(self, time_slice: TimeSlice, *, same_time_only: bool = False) -> None:
-        slice_ = time_slice.slice
-        execution_data_name = self.settings.execution_data_name
-        if execution_data_name is not None and not slice_.bars.get(execution_data_name):
-            return
-        if execution_data_name is None and not slice_.bars:
-            return
-
-        for symbol, orders in list(self.active_orders.items()):
-            security = self.security_manager.add(symbol)
-            for orderid, order in list(orders.items()):
-                if same_time_only and order.datetime != time_slice.time:
-                    continue
-                if order.status in {OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED, OrderStatus.REJECTED}:
-                    del orders[orderid]
-                    continue
-
-                try:
-                    fill = self.fill_model.fill(self._fill_parameters(order, security, slice_))
-                except UnsupportedOrderType as exc:
-                    order.status = OrderStatus.REJECTED
-                    order.datetime = time_slice.time
-                    self.on_order(order)
-                    del orders[orderid]
-                    self.write_log(LogData(f"[BacktestGateway] {exc}", LogLevel.ERROR))
-                    continue
-                if fill is None:
-                    if order.type == OrderType.STP_LMT and getattr(order, "stop_triggered", False):
-                        self.on_order(order)
-                    continue
-
-                self._apply_fill(order, fill)
-                if orderid in orders:
-                    del orders[orderid]
-
-    def _fill_parameters(self, order: OrderData, security, slice_: Slice) -> FillContext:
-        return FillContext(
-            time=slice_.time,
-            order=order,
-            security=security,
-            slice=slice_,
-            securities=self.security_manager,
-            settings=self.settings,
+    def process_valuation(self, time_slice: TimeSlice) -> bool:
+        """Mark the simulated broker account and record one settlement snapshot."""
+        if not time_slice.valuation_updates:
+            return False
+        self.account_ledger.mark_to_market(time_slice.valuation_updates)
+        for position in self.account_ledger.get_all_positions():
+            self.publisher.position_snapshot(position)
+        self.publisher.account(self.account_ledger.account)
+        self.recorder.snapshot(
+            time_slice.time,
+            self.account_ledger,
+            self.security_manager,
         )
+        return True
 
-    def _ensure_symbol(self, symbol: str) -> None:
-        self.active_orders.setdefault(symbol, {})
-        self.pending_orders.setdefault(symbol, {})
-
-    def _find_order(self, symbol: str, orderid: str) -> OrderData | None:
-        return (
-            self.active_orders.get(symbol, {}).get(orderid)
-            or self.pending_orders.get(symbol, {}).get(orderid)
-        )
-
-    def _pop_order(self, symbol: str, orderid: str) -> OrderData | None:
-        for pool in (self.active_orders, self.pending_orders):
-            orders = pool.get(symbol, {})
-            if orderid in orders:
-                return orders.pop(orderid)
-        return None
+    def _match(
+        self,
+        time_slice: TimeSlice,
+        *,
+        same_time_only: bool = False,
+    ) -> None:
+        try:
+            matches = self.matching_engine.match(
+                time_slice,
+                self.order_book.get_active(),
+                same_time_only=same_time_only,
+            )
+        except UnsupportedOrderType as exc:
+            self.write_log(LogData(f"[BacktestGateway] {exc}", LogLevel.ERROR))
+            return
+        for order, fill in matches:
+            self._apply_fill(order, fill)
+            self.order_book.remove_active(order)
 
     def _apply_fill(self, order: OrderData, fill: Fill) -> None:
-        """Apply one full fill while preserving a future partial-fill boundary."""
         remaining = float(order.volume) - float(order.traded)
         if fill.order_id != order.orderid or fill.symbol != order.symbol:
             raise ValueError("fill does not belong to order")
         if not math.isfinite(float(fill.quantity)) or fill.quantity <= 0:
             raise ValueError("fill quantity must be finite and positive")
         if abs(float(fill.quantity) - remaining) > 1e-12:
-            raise ValueError("partial fills are not supported yet; fill must equal remaining quantity")
+            raise ValueError(
+                "partial fills are not supported yet; fill must equal remaining quantity"
+            )
         if not math.isfinite(float(fill.price)) or fill.price <= 0:
             raise ValueError("fill price must be finite and positive")
 
@@ -463,7 +324,6 @@ class BacktestGateway:
         order.traded = float(order.traded) + float(fill.quantity)
         order.avgFillPrice = fill.price
         order.datetime = fill.time
-
         trade = TradeData(
             symbol=order.symbol,
             exchange=order.exchange,
@@ -480,21 +340,33 @@ class BacktestGateway:
             gateway_name=self.gateway_name,
             reference=order.reference,
         )
-        self.on_trade(trade)
+        position = self.account_ledger.apply_trade(trade)
+
         self.on_order(order)
+        self.on_trade(trade)
+        self.publisher.position_snapshot(position)
+        self.publisher.account(self.account_ledger.account)
 
     def get_orders(self) -> list[OrderData]:
-        return [order for orders in self.active_orders.values() for order in orders.values()]
+        return self.order_book.get_active()
 
     def on_order(self, order: OrderData) -> None:
-        self.publisher.on_order(order)
+        self.publisher.order(order)
 
     def on_trade(self, trade: TradeData) -> None:
-        self.publisher.on_trade(trade)
+        self.publisher.trade(trade)
 
     def write_log(self, log_data: LogData) -> None:
-        self.publisher.push_log_event(log_data)
+        self.publisher.log(log_data)
 
 
-class RequestRejected(Exception):
-    """Expected business rejection while processing a request."""
+__all__ = [
+    "BacktestGateway",
+    "BacktestSettings",
+    "BarFillModel",
+    "Fill",
+    "FillContext",
+    "FillModel",
+    "RequestRejected",
+    "UnsupportedOrderType",
+]

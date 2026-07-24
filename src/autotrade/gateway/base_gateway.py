@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from autotrade.engine.event_engine import Event, EventEngine
 from autotrade.engine.event_engine import (
-    EVENT_DATA,
+    EVENT_LIVE_DATA,
     EVENT_ORDER,
     EVENT_TRADE,
     EVENT_POSITION_SNAPSHOT,
@@ -91,8 +91,7 @@ class BaseGateway(ABC):
 
     def on_tick(self, tick: TickData) -> None:
         """Publish market data through the unified data event."""
-        self.on_event(EVENT_DATA, tick)
-        self.on_event(EVENT_DATA + tick.vt_symbol, tick)
+        self.on_event(EVENT_LIVE_DATA, tick)
 
     def on_trade(self, trade: TradeData) -> None:
         """
@@ -138,8 +137,7 @@ class BaseGateway(ABC):
 
     def on_contract(self, contract: ContractData) -> None:
         """Publish instrument definitions through the unified data event."""
-        self.on_event(EVENT_DATA, contract)
-        self.on_event(EVENT_DATA + contract.vt_symbol, contract)
+        self.on_event(EVENT_LIVE_DATA, contract)
 
     def write_log(self, msg: str,level:LogLevel) -> None:
         """

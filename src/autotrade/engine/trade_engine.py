@@ -13,6 +13,16 @@ from autotrade.engine.event_engine import (
     EVENT_ORDER, EVENT_POSITION,
     EVENT_ORDER_REQ, EVENT_CANCEL_REQ, EVENT_MODIFY_REQ, EVENT_COMMAND, EVENT_LOG, EVENT_ROLLOVER
 )
+from autotrade.engine.event_engine import (
+    COMMAND_ORDER_CANCEL,
+    COMMAND_ORDER_MODIFY,
+    COMMAND_ORDER_SUBMIT,
+    Message,
+    MessageKind,
+)
+from autotrade.engine.order_router import OrderRouter
+from autotrade.engine.live_timeslice_builder import LiveTimeSliceBuilder
+from autotrade.engine.clock import LiveClock
 
 CMD_ENGINE_MUTE = "engine.mute"  # data: {"symbols":[...], "on":True/False, "reason":""}
 CMD_ENGINE_SWITCH = "engine.switch"  # data: {"on":True/False}
@@ -26,12 +36,19 @@ class CtaEngine:
     - 仅处理两个命令：engine.mute / engine.switch
     """
 
-    def __init__(self, oms, event_engine: EventEngine, gateway):
+    def __init__(self, oms, event_engine: EventEngine, gateway, *, clock=None):
         self.oms = oms
         self.ee = event_engine
         self.gateway = gateway
+        self.clock = clock or LiveClock()
+        self.gateway.clock = self.clock
 
         self.strategy = None
+        self.order_router = OrderRouter(event_engine)
+        self.live_timeslice_builder = LiveTimeSliceBuilder(
+            event_engine,
+            clock=self.clock,
+        )
         self.active = True
         self._muted_symbols: Set[str] = set()
         self._register()
@@ -42,6 +59,41 @@ class CtaEngine:
         self.ee.register(EVENT_ORDER_REQ, self._on_order_req)
         self.ee.register(EVENT_CANCEL_REQ, self._on_cancel_req)
         self.ee.register(EVENT_MODIFY_REQ, self._on_modify_req)
+        self.ee.register_command(
+            "execution", COMMAND_ORDER_SUBMIT, self._on_order_command
+        )
+        self.ee.register_command(
+            "execution", COMMAND_ORDER_CANCEL, self._on_cancel_command
+        )
+        self.ee.register_command(
+            "execution", COMMAND_ORDER_MODIFY, self._on_modify_command
+        )
+
+    def _on_order_command(self, message: Message):
+        self.gateway.send_order(message.data)
+
+    def _on_cancel_command(self, message: Message):
+        self.gateway.cancel_order(message.data)
+
+    def _on_modify_command(self, message: Message):
+        self.gateway.modify_order(message.data)
+
+    def stop(self):
+        self.order_router.unregister()
+        self.live_timeslice_builder.unregister()
+        self.ee.unregister(EVENT_COMMAND, self._on_cmd)
+        self.ee.unregister(EVENT_ORDER_REQ, self._on_order_req)
+        self.ee.unregister(EVENT_CANCEL_REQ, self._on_cancel_req)
+        self.ee.unregister(EVENT_MODIFY_REQ, self._on_modify_req)
+        self.ee.unregister_command(
+            "execution", COMMAND_ORDER_SUBMIT, self._on_order_command
+        )
+        self.ee.unregister_command(
+            "execution", COMMAND_ORDER_CANCEL, self._on_cancel_command
+        )
+        self.ee.unregister_command(
+            "execution", COMMAND_ORDER_MODIFY, self._on_modify_command
+        )
 
     # ---- 白名单（模块内单：ROLL:/RISK:/ENGINE:） ----
     @staticmethod
@@ -91,13 +143,16 @@ class CtaEngine:
                 reason = payload.get("reason", "")
                 if on:
                     self._muted_symbols |= syms
+                    self.order_router.mute(syms, enabled=True)
                     self.write_log(f"[ENGINE] mute ON {syms} reason={reason}", level=LogLevel.INFO)
                 else:
                     self._muted_symbols -= syms
+                    self.order_router.mute(syms, enabled=False)
                     self.write_log(f"[ENGINE] mute OFF {syms} reason={reason}", level=LogLevel.INFO)
 
             elif cmd == CMD_ENGINE_SWITCH:
                 self.active = bool(payload.get("on"))
+                self.order_router.active = self.active
                 self.write_log(f"[ENGINE] active={self.active}", level=LogLevel.INFO)
 
 
@@ -298,7 +353,7 @@ class RolloverManager:
             type=OrderType.MARKET, price=0, volume=float(vol),
             trigger_price=0, reference=ref
         )
-        self.ee.put(Event(EVENT_ORDER_REQ, req))
+        self._send_rollover_order_command(COMMAND_ORDER_SUBMIT, req)
 
     def _send_close_old(self, t: Task):
         vol, dire = self._calc_net_pos(t.old_symbol)
@@ -311,7 +366,7 @@ class RolloverManager:
             type=OrderType.MARKET, price=0, volume=float(vol),
             trigger_price=0, reference=ref
         )
-        self.ee.put(Event(EVENT_ORDER_REQ, req))
+        self._send_rollover_order_command(COMMAND_ORDER_SUBMIT, req)
 
     # ---------- finish ----------
     def _check_finish(self, t: Task):
@@ -335,9 +390,20 @@ class RolloverManager:
         for o in self.oms.get_all_active_orders():
             ref = o.reference or ""
             if (o.symbol in impacted) and (not ref.startswith("ROLL:")):
-                self.ee.put(Event(EVENT_CANCEL_REQ, CancelRequest(
+                self._send_rollover_order_command(COMMAND_ORDER_CANCEL, CancelRequest(
                     orderid=o.orderid, symbol=o.symbol, exchange=o.exchange
-                )))
+                ))
+
+    def _send_rollover_order_command(self, name: str, request) -> None:
+        self.ee.put(
+            Message(
+                MessageKind.COMMAND,
+                name,
+                request,
+                source="rollover_manager",
+                target="order_router",
+            )
+        )
 
     def _has_active_nonroll(self, t: Task) -> bool:
         impacted = {t.symbol_group, t.old_symbol, t.new_symbol}

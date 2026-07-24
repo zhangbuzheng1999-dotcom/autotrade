@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING
-
 import pandas as pd
 
+from autotrade.backtest.account_ledger import AccountLedger
 from autotrade.engine.security_manager import SecurityManager
-
-if TYPE_CHECKING:
-    from autotrade.backtest.backtest_oms_engine import BacktestOms
+from autotrade.engine.oms_engine import OmsBase
 
 
 class BacktestRecorder:
@@ -24,10 +21,10 @@ class BacktestRecorder:
     def snapshot(
         self,
         when,
-        oms: BacktestOms,
+        ledger: AccountLedger,
         security_manager: SecurityManager,
     ) -> None:
-        account = oms.account
+        account = ledger.account
         self.account_daily[when] = {
             "cash": account.cash,
             "margin": account.margin,
@@ -36,38 +33,38 @@ class BacktestRecorder:
             "equity": account.equity,
             "available": account.available,
         }
-        self.position_daily[when] = deepcopy(oms.get_all_positions())
+        self.position_daily[when] = deepcopy(ledger.get_all_positions())
 
         symbols = (
-            set(oms.positions)
-            | set(oms.realized_pnl_by_symbol)
-            | set(oms.turnover_by_symbol)
+            set(ledger.positions)
+            | set(ledger.realized_pnl_by_symbol)
+            | set(ledger.turnover_by_symbol)
         )
         self.contract_daily[when] = {
-            symbol: self._symbol_snapshot(symbol, oms, security_manager)
+            symbol: self._symbol_snapshot(symbol, ledger, security_manager)
             for symbol in sorted(symbols)
         }
 
     @staticmethod
     def _symbol_snapshot(
         symbol: str,
-        oms: BacktestOms,
+        ledger: AccountLedger,
         security_manager: SecurityManager,
     ) -> dict:
-        position = oms.get_position(symbol)
+        position = ledger.positions.get(symbol)
         security = security_manager.get(symbol)
         return {
             "volume": 0.0 if position is None else position.volume,
             "margin": 0.0 if position is None else position.margin,
-            "realized_pnl": oms.realized_pnl_by_symbol.get(symbol, 0.0),
-            "unrealized_pnl": oms.unrealized_pnl_by_symbol.get(symbol, 0.0),
-            "turnover": oms.turnover_by_symbol.get(symbol, 0.0),
-            "commission": oms.commission_by_symbol.get(symbol, 0.0),
+            "realized_pnl": ledger.realized_pnl_by_symbol.get(symbol, 0.0),
+            "unrealized_pnl": ledger.unrealized_pnl_by_symbol.get(symbol, 0.0),
+            "turnover": ledger.turnover_by_symbol.get(symbol, 0.0),
+            "commission": ledger.commission_by_symbol.get(symbol, 0.0),
             "price": None if security is None else security.price,
         }
 
     @staticmethod
-    def get_trade_log_df(oms: BacktestOms) -> pd.DataFrame:
+    def get_trade_log_df(oms: OmsBase) -> pd.DataFrame:
         return pd.DataFrame([
             {
                 "datetime": trade.datetime,
@@ -81,7 +78,7 @@ class BacktestRecorder:
                 "status": trade.status,
                 "reference": trade.reference,
             }
-            for trade in oms.trade_log
+            for trade in oms.get_all_trades()
         ])
 
     def get_account_daily_df(self) -> pd.DataFrame:

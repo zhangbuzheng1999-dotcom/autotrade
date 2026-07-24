@@ -53,6 +53,22 @@ class OmsBase:
         self.event_engine.register(EVENT_ACCOUNT, self.process_account_event)
         self.event_engine.register(EVENT_QUOTE, self.process_quote_event)
 
+    def unregister_event(self):
+        self.event_engine.unregister(EVENT_ORDER, self.process_order_event)
+        self.event_engine.unregister(EVENT_TRADE, self.process_trade_event)
+        self.event_engine.unregister(
+            EVENT_POSITION_SNAPSHOT,
+            self.process_position_snapshot_event,
+        )
+        self.event_engine.unregister(EVENT_ACCOUNT, self.process_account_event)
+        self.event_engine.unregister(EVENT_QUOTE, self.process_quote_event)
+
+    def start(self):
+        """Lifecycle compatibility hook."""
+
+    def stop(self):
+        self.unregister_event()
+
     # ========== 事件处理 ==========
     def process_order_event(self, event: Event):
         order: OrderData = event.data
@@ -189,6 +205,11 @@ class OmsBase:
 
     def get_all_trades(self):
         return list(self.trades.values())
+
+    @property
+    def trade_log(self) -> list[TradeData]:
+        """Ordered view of authoritative trades for live and backtest callers."""
+        return self.get_all_trades()
 
     def get_all_positions(self):
         return list(self.positions.values())

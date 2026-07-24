@@ -11,6 +11,10 @@ from autotrade.engine.event_engine import (
     Event,
 )
 from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+from autotrade.backtest.backtest_engine import BacktestEngine
+from autotrade.backtest.account_ledger import AccountLedger
+from autotrade.backtest.backtest_order_book import SimulatedOrderBook
+from autotrade.backtest.matching_engine import MatchingEngine
 from autotrade.engine.oms_engine import OmsBase
 from autotrade.engine.security_manager import SecurityManager
 
@@ -93,6 +97,31 @@ class StateOwnershipTests(unittest.TestCase):
 
         self.assertEqual(self.oms.get_position("RB99").volume, 3)
         self.assertEqual(len(published), 1)
+
+    def test_backtest_uses_shared_oms_and_composed_simulated_broker(self):
+        engine = BacktestEngine(logger=_QuietLogger())
+
+        self.assertIs(type(engine.oms), OmsBase)
+        self.assertIsInstance(engine.gateway.order_book, SimulatedOrderBook)
+        self.assertIsInstance(engine.gateway.matching_engine, MatchingEngine)
+        self.assertIsInstance(engine.gateway.account_ledger, AccountLedger)
+        self.assertIsNotNone(
+            engine.oms.get_account(engine.gateway.account_ledger.account.vt_accountid)
+        )
+
+
+class _QuietLogger:
+    def debug(self, _message):
+        pass
+
+    def info(self, _message):
+        pass
+
+    def warning(self, _message):
+        pass
+
+    def error(self, _message):
+        pass
 
 
 if __name__ == "__main__":

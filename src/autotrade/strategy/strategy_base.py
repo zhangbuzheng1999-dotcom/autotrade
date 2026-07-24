@@ -2,20 +2,25 @@
 from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional
-from autotrade.backtest.backtest_event_engine import (
-    EVENT_DATA,
+from autotrade.coreutils.constant import Interval, Exchange, Direction, OrderType, OrderStatus
+from autotrade.coreutils.object import BarData, OrderData, TradeData, OrderRequest, ModifyRequest, CancelRequest, PositionData, \
+    LogData, Request, RequestStatus, RequestType, Slice, Tick, TickData, TradeBar
+from autotrade.engine.event_engine import (
+    COMMAND_ORDER_CANCEL,
+    COMMAND_ORDER_MODIFY,
+    COMMAND_ORDER_SUBMIT,
+    EVENT_LOG,
+    EVENT_ORDER,
+    EVENT_POSITION,
     EVENT_REQUEST,
     EVENT_REQUEST_STATUS,
     EVENT_SLICE,
-    BacktestEventEngine,
+    EVENT_TRADE,
     Event,
+    EventEngine,
+    Message,
+    MessageKind,
 )
-from autotrade.coreutils.constant import Interval, Exchange, Direction, OrderType, OrderStatus
-from autotrade.coreutils.object import BarData, OrderData, TradeData, OrderRequest, ModifyRequest, CancelRequest, PositionData, \
-    LogData, Request, RequestStatus, RequestType, Tick, TickData, TradeBar
-from autotrade.engine.event_engine import EventEngine, EVENT_ORDER, EVENT_TRADE, EVENT_LOG, \
-    EVENT_ORDER_REQ, EVENT_CANCEL_REQ, EVENT_MODIFY_REQ, EVENT_POSITION
-from autotrade.backtest.backtest_event_engine import BacktestEventEngine
 
 # ===================== 常量/工具 =====================
 
@@ -53,14 +58,12 @@ class StrategyBase:
 
     def __init__(
             self,
-            event_engine: EventEngine | BacktestEventEngine,
+            event_engine: EventEngine,
             security_manager=None,
     ):
 
         self.me = event_engine
         self.security_manager = security_manager
-
-        self.ee = BacktestEventEngine()
 
         self.exchange = Exchange.HKFE
 
@@ -71,12 +74,24 @@ class StrategyBase:
         self._last_action_at = defaultdict(float)  # 按 (symbol, ref) 限频
 
         # —— 事件注册：统一对齐入口 ——
-        self.ee.register(EVENT_RECONCILE, self._on_reconcile)
-        # （如需要，也可注册 EVENT_ORDER/EVENT_TRADE 到 on_order/on_trade）
-        self.ee.start()
-
     def initialize(self):
         self.register_event()
+
+    def unregister_event(self):
+        self.me.unregister(EVENT_ORDER, self.process_order_event)
+        self.me.unregister(EVENT_TRADE, self.process_trade_event)
+        self.me.unregister(EVENT_POSITION, self.process_position_event)
+        self.me.unregister(EVENT_SLICE, self.process_data_event)
+        self.me.unregister(
+            EVENT_REQUEST_STATUS,
+            self.process_request_status_event,
+        )
+
+    def start(self):
+        self.initialize()
+
+    def stop(self):
+        self.unregister_event()
 
     # ===================== Engine 直接回调：只入队 =====================
     def register_event(self):
@@ -117,19 +132,24 @@ class StrategyBase:
         self.me.put(Event(EVENT_LOG, log_data))
 
     def push_order_request(self, order_req: OrderRequest):
-        if self.security_manager is not None:
-            return self.push_request(Request(RequestType.ORDER, order_req))
-        self.me.put(Event(EVENT_ORDER_REQ, order_req))
+        return self._send_order_command(COMMAND_ORDER_SUBMIT, order_req)
 
     def push_cancel_request(self, cancel_req: CancelRequest):
-        if self.security_manager is not None:
-            return self.push_request(Request(RequestType.CANCEL, cancel_req))
-        self.me.put(Event(EVENT_CANCEL_REQ, cancel_req))
+        return self._send_order_command(COMMAND_ORDER_CANCEL, cancel_req)
 
     def push_modify_request(self, modify_req: ModifyRequest):
-        if self.security_manager is not None:
-            return self.push_request(Request(RequestType.MODIFY, modify_req))
-        self.me.put(Event(EVENT_MODIFY_REQ, modify_req))
+        return self._send_order_command(COMMAND_ORDER_MODIFY, modify_req)
+
+    def _send_order_command(self, name: str, data) -> str:
+        message = Message(
+            MessageKind.COMMAND,
+            name,
+            data,
+            source=f"strategy.{type(self).__name__}",
+            target="order_router",
+        )
+        self.me.put(message)
+        return message.message_id
 
     def push_request(self, request: Request) -> str:
         self.me.put(Event(EVENT_REQUEST, request))
@@ -152,14 +172,16 @@ class StrategyBase:
     def on_tick(self, tick: TickData):
         pass
 
-    def on_data(self, slice_):
-        """Dispatch unified live data or replay the bars in a backtest Slice."""
-        if isinstance(slice_, (BarData, TradeBar)):
-            self.on_bar(slice_)
-            return
-        if isinstance(slice_, (TickData, Tick)):
-            self.on_tick(slice_)
-            return
+    def on_data(self, slice_: Slice):
+        """Dispatch one standard Slice in both live and backtest runtimes."""
+        if not isinstance(slice_, Slice):
+            raise TypeError(
+                f"StrategyBase expects Slice, got {type(slice_).__name__}"
+            )
+        for data_name in getattr(slice_, "ticks", {}).values():
+            for ticks in data_name.values():
+                for tick in ticks:
+                    self.on_tick(tick)
         for bar in getattr(slice_, "bar_list", []):
             self.on_bar(bar)
 
@@ -175,7 +197,7 @@ class StrategyBase:
     def _request_realign(self):
         if not self._realign_pending:
             self._realign_pending = True
-            self.ee.put(Event(EVENT_RECONCILE))
+            self._on_reconcile(Event(EVENT_RECONCILE))
 
     def _on_reconcile(self, _ev: Event):
         if self._reconciling:

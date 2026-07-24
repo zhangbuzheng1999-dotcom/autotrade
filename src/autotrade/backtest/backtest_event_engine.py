@@ -16,6 +16,8 @@ from autotrade.engine.event_engine import (
     EVENT_TRADE,
     Event,
     EventEngine,
+    Message,
+    MessageKind,
 )
 
 class BacktestEventEngine(EventEngine):
@@ -28,7 +30,7 @@ class BacktestEventEngine(EventEngine):
 
     def __init__(self) -> None:
         super().__init__()
-        self._queue: deque[Event] = deque()
+        self._queue: deque[Event | Message] = deque()
         self._processing = False
 
     def start(self) -> None:
@@ -37,7 +39,7 @@ class BacktestEventEngine(EventEngine):
     def stop(self) -> None:
         """Compatibility no-op: no worker threads are owned by this engine."""
 
-    def put(self, event: Event) -> None:
+    def put(self, event: Event | Message) -> None:
         self._queue.append(event)
         if self._processing:
             return
@@ -60,5 +62,7 @@ __all__ = [
     "EVENT_SLICE",
     "EVENT_TRADE",
     "Event",
+    "Message",
+    "MessageKind",
     "BacktestEventEngine",
 ]

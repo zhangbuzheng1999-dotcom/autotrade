@@ -45,7 +45,7 @@ security_data_names  -> TimeSlice.security_updates
 valuation_data_names -> TimeSlice.valuation_updates
 ```
 
-Reader 不决定消费者，SecurityManager 和 BacktestOms 也不扫描 Slice。
+Reader 不决定消费者，SecurityManager 和模拟券商账本也不扫描 Slice。
 
 ### SecurityManager
 
@@ -64,23 +64,23 @@ Chain 直接引用这些 Contract，不再维护第二套轻量合约对象。
 InstrumentStateData 更新合约属性和生命周期；Bar、Tick、Quote 更新高频市场状态。
 其他模块只读取 Security，不维护合约参数副本。
 
-### OmsBase 与 BacktestOms
+### OmsBase 与 BacktestGateway
 
-`OmsBase` 是实盘和回测共用的订单、成交、持仓、账户和报价状态中心。它消费
+`OmsBase` 是实盘和回测完全共用的订单、成交、持仓、账户和报价状态中心。它消费
 `EVENT_ORDER`、`EVENT_TRADE`、`EVENT_ACCOUNT`、`EVENT_QUOTE` 以及券商持仓快照；
 成交更新持仓后由 OMS 发布 `EVENT_POSITION`。
 
-`BacktestOms` 继承 `OmsBase`，只覆盖成交后的模拟账务 hook，并在 TimeSlice 末尾
-消费 `valuation_updates` 完成盯市。合约乘数、保证金率和手续费率始终直接读取共享
-的 SecurityManager，不保留第二份合约参数。
+`BacktestGateway` 是模拟券商门面，内部组合 OrderBook、MatchingEngine、
+AccountLedger、CommissionModel、MarginModel 和 EventPublisher。它负责模拟订单、
+成交、持仓、手续费、保证金和账户估值，并发布与实盘 Gateway 相同的订单、成交、
+持仓快照和账户事件。合约参数始终直接读取共享 SecurityManager。
 
 ### Recorder 与 Analyzer
 
-`BacktestRecorder` 是 `BacktestOms` 的内部协作者。当且仅当 TimeSlice 包含
-`valuation_updates` 时，OMS 才完成盯市、发布账户并立即记录快照；Tick 或其他非估值
-数据不会产生账户历史。Recorder 只读复制 OMS 和 SecurityManager 的权威状态，不参与
-资金或持仓计算。`PerformanceAnalyzer` 对 Recorder 的历史快照做纯统计，不持有运行时
-交易状态。
+`BacktestRecorder` 是模拟券商的内部协作者。当且仅当 TimeSlice 包含
+`valuation_updates` 时，AccountLedger 才完成盯市，Gateway 随后发布账户并立即记录
+快照；Tick 或其他非估值数据不会产生账户历史。Recorder 不参与资金或持仓计算。
+`PerformanceAnalyzer` 对 Recorder 的历史快照做纯统计，不持有运行时交易状态。
 
 ### Engine
 
@@ -97,10 +97,28 @@ SecurityManager
 -> Gateway before data
 -> Strategy
 -> Gateway after data
--> BacktestOms valuation + recorder snapshot
+-> BacktestGateway valuation + recorder snapshot
 ```
 
 Engine 不读取 DataFrame、不持有 Reader 或数据源配置，也不决定数据频率。
+
+TimeSlice 的阶段顺序由共享 `TimeSliceDriver` 明确推进。回测使用同步
+`BacktestEventEngine`，所以 security update、market before、strategy Slice、
+market after、valuation 中每个阶段及其派生事件处理完成后才进入下一阶段。
+BacktestGateway 通过发送给 `simulated_broker` 的 Command 接收撮合和估值阶段，
+BacktestEngine 不再直接调用其业务方法。
+
+## 实盘与回测共享协议
+
+策略、移仓和外部模块统一向 `order_router` 发送 `order.submit`、`order.cancel`、
+`order.modify` Command；OrderRouter 完成开关和 mute 检查后转发给逻辑目标
+`execution`。实盘 Gateway 与 BacktestGateway 绑定同一执行能力，订单、成交、
+持仓和账户结果继续通过广播事件进入共享 OmsBase。
+
+实盘 Gateway 将原始回调发布为 `EVENT_LIVE_DATA`，`LiveTimeSliceBuilder` 将 Tick、
+Bar 和多数据源批次标准化为 TimeSlice，再交给同一个 TimeSliceDriver。策略只订阅
+`EVENT_SLICE`。实盘 EventEngine 异步入队，BacktestEventEngine 同步排空；消息路由、
+模块和数据对象保持一致。
 
 ## Instrument 生命周期
 

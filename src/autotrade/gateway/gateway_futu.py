@@ -3,7 +3,7 @@ import pandas as pd
 from futu import (TickerHandlerBase, SubType, OpenQuoteContext, OpenSecTradeContext,
                   OpenFutureTradeContext, SecurityFirm, RET_OK, RET_ERROR, TrdEnv, ModifyOrderOp, TradeOrderHandlerBase,
                   )
-from autotrade.engine.event_engine import EventEngine, EVENT_DATA, EVENT_TRADE, EVENT_ORDER
+from autotrade.engine.event_engine import EventEngine, EVENT_LIVE_DATA, EVENT_TRADE, EVENT_ORDER
 from autotrade.gateway.base_gateway import BaseGateway
 from autotrade.coreutils.object import (TickData, BarData, TradeData, Exchange, ModifyRequest, HistoryRequest, CancelRequest,
                                  OrderData,
@@ -168,8 +168,7 @@ class FutuGateway(BaseGateway):
         )
 
         self._monitor_loop(tick)
-        self.on_event(EVENT_DATA, tick)
-        self.on_event(EVENT_DATA + tick.symbol, tick)
+        self.on_event(EVENT_LIVE_DATA, tick)
 
     def get_order_from_map(self, order_id=None, broker_id=None):
         # futu的orderid(broker_id)与本地的order_id相互转换
@@ -331,8 +330,7 @@ class FutuGateway(BaseGateway):
             gateway_name=self.gateway_name
         )
 
-        self.on_event(EVENT_DATA, bar)
-        self.on_event(EVENT_DATA + bar.symbol, bar)
+        self.on_event(EVENT_LIVE_DATA, bar)
 
     def on_trade(self, trade: TradeData) -> None:
         """
@@ -789,7 +787,7 @@ if __name__ == "__main__":
 
     # 创建事件引擎
     event_engine = EventEngine()
-    event_engine.register(EVENT_DATA, print_tick)
+    event_engine.register(EVENT_LIVE_DATA, print_tick)
     event_engine.register(EVENT_ORDER, on_order)
     event_engine.register(EVENT_TRADE, on_trade)
     event_engine.start()

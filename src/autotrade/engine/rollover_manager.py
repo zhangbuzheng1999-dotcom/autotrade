@@ -10,6 +10,8 @@ from autotrade.engine.event_engine import (
     EVENT_ROLLOVER,            # data: {"symbol_group","old","new","mode"}
     EVENT_ORDER, EVENT_POSITION,
     EVENT_ORDER_REQ, EVENT_CANCEL_REQ,
+    COMMAND_ORDER_SUBMIT, COMMAND_ORDER_CANCEL,
+    Message, MessageKind,
 )
 
 
@@ -198,7 +200,7 @@ class RolloverManager:
             type=OrderType.MARKET, price=0, volume=float(vol),
             trigger_price=0, reference=ref
         )
-        self.ee.put(Event(EVENT_ORDER_REQ, req))
+        self._send_order_command(COMMAND_ORDER_SUBMIT, req)
 
     def _send_close_old(self, t: Task):
         vol, dire = self._calc_net_pos(t.old_symbol)
@@ -211,7 +213,7 @@ class RolloverManager:
             type=OrderType.MARKET, price=0, volume=float(vol),
             trigger_price=0, reference=ref
         )
-        self.ee.put(Event(EVENT_ORDER_REQ, req))
+        self._send_order_command(COMMAND_ORDER_SUBMIT, req)
 
     # ---------- finish ----------
     def _check_finish(self, t: Task):
@@ -235,9 +237,20 @@ class RolloverManager:
         for o in self.oms.get_all_active_orders():
             ref = o.reference or ""
             if (o.symbol in impacted) and (not ref.startswith("ROLL:")):
-                self.ee.put(Event(EVENT_CANCEL_REQ, CancelRequest(
+                self._send_order_command(COMMAND_ORDER_CANCEL, CancelRequest(
                     orderid=o.orderid, symbol=o.symbol, exchange=o.exchange
-                )))
+                ))
+
+    def _send_order_command(self, name: str, request) -> None:
+        self.ee.put(
+            Message(
+                MessageKind.COMMAND,
+                name,
+                request,
+                source="rollover_manager",
+                target="order_router",
+            )
+        )
 
     def _has_active_nonroll(self, t: Task) -> bool:
         impacted = {t.symbol_group, t.old_symbol, t.new_symbol}
