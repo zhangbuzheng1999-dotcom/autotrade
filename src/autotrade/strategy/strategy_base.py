@@ -2,10 +2,16 @@
 from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional
-from autotrade.backtest.backtest_event_engine import Event, BacktestEventEngine
+from autotrade.backtest.backtest_event_engine import (
+    EVENT_DATA,
+    EVENT_REQUEST,
+    EVENT_REQUEST_STATUS,
+    BacktestEventEngine,
+    Event,
+)
 from autotrade.coreutils.constant import Interval, Exchange, Direction, OrderType, OrderStatus
 from autotrade.coreutils.object import BarData, OrderData, TradeData, OrderRequest, ModifyRequest, CancelRequest, PositionData, \
-    LogData, TickData
+    LogData, Request, RequestStatus, RequestType, TickData
 from autotrade.engine.event_engine import EventEngine, EVENT_TICK, EVENT_ORDER, EVENT_TRADE, EVENT_BAR, EVENT_LOG, \
     EVENT_ORDER_REQ, EVENT_CANCEL_REQ, EVENT_MODIFY_REQ, EVENT_POSITION
 from autotrade.backtest.backtest_event_engine import BacktestEventEngine
@@ -44,9 +50,14 @@ class StrategyBase:
     - 含：in-flight cancel 幂等、版本/幂等键、按键限频、tick 幂等判断、seed-stop 瞬间保护
     """
 
-    def __init__(self, event_engine: EventEngine | BacktestEventEngine):
+    def __init__(
+            self,
+            event_engine: EventEngine | BacktestEventEngine,
+            security_manager=None,
+    ):
 
         self.me = event_engine
+        self.security_manager = security_manager
 
         self.ee = BacktestEventEngine()
 
@@ -74,6 +85,8 @@ class StrategyBase:
         self.me.register(EVENT_TRADE, self.process_trade_event)
         self.me.register(EVENT_POSITION, self.process_position_event)
         self.me.register(EVENT_BAR, self.process_bar_event)
+        self.me.register(EVENT_DATA, self.process_data_event)
+        self.me.register(EVENT_REQUEST_STATUS, self.process_request_status_event)
 
     def process_order_event(self, event: Event):
         order: OrderData = event.data
@@ -95,17 +108,33 @@ class StrategyBase:
         bar: BarData = event.data
         self.on_bar(bar)
 
+    def process_data_event(self, event: Event):
+        self.on_data(event.data)
+
+    def process_request_status_event(self, event: Event):
+        self.on_request_status(event.data)
+
     def push_log_event(self, log_data: LogData):
         self.me.put(Event(EVENT_LOG, log_data))
 
     def push_order_request(self, order_req: OrderRequest):
+        if self.security_manager is not None:
+            return self.push_request(Request(RequestType.ORDER, order_req))
         self.me.put(Event(EVENT_ORDER_REQ, order_req))
 
     def push_cancel_request(self, cancel_req: CancelRequest):
+        if self.security_manager is not None:
+            return self.push_request(Request(RequestType.CANCEL, cancel_req))
         self.me.put(Event(EVENT_CANCEL_REQ, cancel_req))
 
     def push_modify_request(self, modify_req: ModifyRequest):
+        if self.security_manager is not None:
+            return self.push_request(Request(RequestType.MODIFY, modify_req))
         self.me.put(Event(EVENT_MODIFY_REQ, modify_req))
+
+    def push_request(self, request: Request) -> str:
+        self.me.put(Event(EVENT_REQUEST, request))
+        return request.request_id
 
     # ===================== Engine 直接回调：只入队 =====================
     def on_order(self, order: OrderData):
@@ -123,6 +152,18 @@ class StrategyBase:
 
     def on_tick(self, tick: TickData):
         pass
+
+    def on_data(self, slice_):
+        """Default Slice fallback: replay its primary bars to ``on_bar``."""
+        for bar in getattr(slice_, "bar_list", []):
+            self.on_bar(bar)
+
+    def on_request_status(self, status: RequestStatus):
+        pass
+
+    @property
+    def securities(self):
+        return self.security_manager
 
     # ===================== 统一对齐入口（事件线程串行） =====================
 
@@ -186,11 +227,11 @@ class StrategyBase:
     def _execute(self, plan: List[Tuple[str, ModifyRequest | OrderRequest | CancelRequest]]):
         for act, req in plan:
             if act == "place":
-                self.me.put(Event(EVENT_ORDER_REQ, req))
+                self.push_order_request(req)
             elif act == "modify":
-                self.me.put(Event(EVENT_MODIFY_REQ, req))
+                self.push_modify_request(req)
             elif act == "cancel":
-                self.me.put(Event(EVENT_CANCEL_REQ, req))
+                self.push_cancel_request(req)
 
     def write_log(self, log_data: LogData):
         self.me.put(Event(EVENT_LOG, log_data))

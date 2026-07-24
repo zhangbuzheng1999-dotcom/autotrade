@@ -9,21 +9,15 @@ from threading import Thread
 from time import sleep
 from typing import Any
 
-EVENT_TIMER = "eTimer"
-EVENT_TICK = "eTick."
-EVENT_BAR = "eBar."
 EVENT_TRADE = "eTrade."
 EVENT_ORDER = "eOrder."
 EVENT_POSITION = "ePosition."
 EVENT_ACCOUNT = "eAccount."
-EVENT_QUOTE = "eQuote."
 EVENT_CONTRACT = "eContract."
 EVENT_LOG = "eLog"
-EVENT_ORDER_REQ = "evt.order.req"  # data: OrderRequest
-EVENT_CANCEL_REQ = "evt.cancel.req"  # data: CancelRequest
-EVENT_MODIFY_REQ = "evt.modify.req"  # data: ModifyRequest
-EVENT_ROLLOVER = 'evt.rollover'
-EVENT_COMMAND = "cta_command"  # 普通命令转投到 CTA 侧用的事件名
+EVENT_DATA = "event_data"  # data: Slice
+EVENT_REQUEST = "event_request"  # data: Request
+EVENT_REQUEST_STATUS = "event_request_status"  # data: RequestStatus
 
 class Event:
     """

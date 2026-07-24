@@ -2,6 +2,25 @@
 
 ---
 
+## TimeSlice 流式回测
+
+原 `autotrade_lean` 过渡实现已经合并到主包。回测入口现在是
+`autotrade.backtest.BacktestEngine`，数据管线位于
+`autotrade.backtest.data`，标准行情、`Security`、`Slice` 和 `TimeSlice`
+统一定义在 `autotrade.coreutils.object`。
+
+```python
+from autotrade.backtest import BacktestEngine
+from autotrade.backtest.data import DataManager, DataRoutingConfig
+
+engine = BacktestEngine()
+engine.run(data_manager.stream())
+```
+
+完整结构和执行顺序见
+[`docs/BACKTEST_ARCHITECTURE.md`](docs/BACKTEST_ARCHITECTURE.md)，可运行示例见
+[`example/multi_period_bollinger_backtest.py`](example/multi_period_bollinger_backtest.py)。
+
 **前言**
 
 这个项目是使用VNPY的一些核心思想进行搭建的。之所以没有直接使用VNPY，是我当时看到VNPY的代码时立马被其庞杂的代码给绕晕。得益于VNPY开源共建社区的特性，VNPY的功能十分强大；但同样这一特性也导致代码风格上的不统一和功能上的重复，一些功能对我本人来说也用不到相反增加了代码的复杂度。基于这个困境当时我决定保留VNPY中引擎+事件驱动的核心精华，并在此基础上进行了自己的交易框架构建。这个框架与VNPY最大的一个不同是十分重视代码之间的解耦:例如VNPY中策略和引擎之间是直接调用关系，而我将其改成通过事件引擎沟通（关于这个我猜测是由于VNPY初始版的回测中没有解决事件引擎同步调用带来的问题，所以实盘的交易引擎也采用这一特性）。虽然目前有一部分代码如GATEWAY中关于bar撮合的部分，由于是很久以前写的并没有做到解耦（目前也缺乏动力修改）,但大部分代码都遵循这一原则，不同模块、功能直接可以单独运行并进行检测。第二个不同在于这个项目提供了监测的APP，并有对应的引擎补充工具方便引擎与APP之间通信。
