@@ -1,6 +1,6 @@
 from autotrade.coreutils.logger import get_logger
 from autotrade.coreutils.constant import Exchange, Interval
-from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+from autotrade.backtest.event_engine import BacktestEventEngine
 from autotrade.backtest.backtest_engine import BacktestEngine
 from autotrade.backtest.data import (
     DataManager,
@@ -21,7 +21,7 @@ logger = get_logger(name='backtest', logfile='macd.log')
 # 回测里面事件引擎必须用BacktestEventEngine
 event_engine = BacktestEventEngine()
 # ==============4.导入策略=================
-strategy = MACDStrategy(event_engine=event_engine, symbol="HK.MHImain", work_interval=Interval.K_1H)
+strategy = MACDStrategy(event_engine=event_engine, instrument_id="HK.MHImain", work_interval=Interval.K_1H)
 strategy.initialize()
 # ==============5.回测引擎=================
 engine = BacktestEngine(event_engine=event_engine, logger=logger, initial_cash=50000)
@@ -36,7 +36,7 @@ data_manager.add_data(
     "instruments",
     FutureStateReader().read(
         pd.DataFrame([{
-            "symbol": "HK.MHImain",
+            "instrument_id": "HK.MHImain",
             "multiplier": 10,
             "margin_rate": 0.1,
             "commission_rate": 0.00006,

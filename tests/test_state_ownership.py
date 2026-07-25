@@ -1,8 +1,18 @@
 import unittest
 from datetime import datetime
 
-from autotrade.coreutils.constant import Direction, Exchange, Product
-from autotrade.coreutils.object import ContractData, PositionData, TickData, TradeData
+from autotrade.coreutils.constant import Direction, Exchange, OrderType, Product
+from autotrade.coreutils.object import (
+    ContractData,
+    OrderRequest,
+    PositionData,
+    Slice,
+    TickData,
+    TimeSlice,
+    TradeBar,
+    TradeData,
+    ValuationUpdate,
+)
 from autotrade.engine.event_engine import (
     EVENT_DATA,
     EVENT_POSITION,
@@ -10,12 +20,13 @@ from autotrade.engine.event_engine import (
     EVENT_TRADE,
     Event,
 )
-from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+from autotrade.backtest.event_engine import BacktestEventEngine
 from autotrade.backtest.backtest_engine import BacktestEngine
-from autotrade.backtest.account_ledger import AccountLedger
-from autotrade.backtest.backtest_order_book import SimulatedOrderBook
-from autotrade.backtest.matching_engine import MatchingEngine
-from autotrade.engine.oms_engine import OmsBase
+from autotrade.backtest.gateway import Fill
+from autotrade.backtest.gateway import AccountLedger
+from autotrade.backtest.gateway import SimulatedOrderBook
+from autotrade.backtest.gateway import MatchingEngine
+from autotrade.engine.oms import OmsBase
 from autotrade.engine.security_manager import SecurityManager
 
 
@@ -28,7 +39,7 @@ class StateOwnershipTests(unittest.TestCase):
     def test_security_manager_alone_consumes_market_and_contract_data(self):
         contract = ContractData(
             gateway_name="SIM",
-            symbol="RB99",
+            instrument_id="RB99",
             exchange=Exchange.SHFE,
             name="rebar",
             product=Product.FUTURES,
@@ -37,7 +48,7 @@ class StateOwnershipTests(unittest.TestCase):
         )
         tick = TickData(
             gateway_name="SIM",
-            symbol="RB99",
+            instrument_id="RB99",
             exchange=Exchange.SHFE,
             datetime=datetime(2024, 1, 1),
             last_price=3500,
@@ -62,7 +73,7 @@ class StateOwnershipTests(unittest.TestCase):
         )
         trade = TradeData(
             gateway_name="SIM",
-            symbol="RB99",
+            instrument_id="RB99",
             exchange=Exchange.SHFE,
             orderid="O1",
             tradeid="T1",
@@ -86,7 +97,7 @@ class StateOwnershipTests(unittest.TestCase):
         )
         snapshot = PositionData(
             gateway_name="SIM",
-            symbol="RB99",
+            instrument_id="RB99",
             exchange=Exchange.SHFE,
             direction=Direction.NET,
             volume=3,
@@ -106,8 +117,58 @@ class StateOwnershipTests(unittest.TestCase):
         self.assertIsInstance(engine.gateway.matching_engine, MatchingEngine)
         self.assertIsInstance(engine.gateway.account_ledger, AccountLedger)
         self.assertIsNotNone(
-            engine.oms.get_account(engine.gateway.account_ledger.account.vt_accountid)
+            engine.oms.get_account(engine.gateway.account_ledger.account.accountid)
         )
+
+    def test_backtest_fill_and_valuation_do_not_replay_position_snapshots(self):
+        engine = BacktestEngine(logger=_QuietLogger())
+        position_events = []
+        snapshot_events = []
+        engine.event_engine.register(
+            EVENT_POSITION,
+            lambda event: position_events.append(event.data),
+        )
+        engine.event_engine.register(
+            EVENT_POSITION_SNAPSHOT,
+            lambda event: snapshot_events.append(event.data),
+        )
+        request = OrderRequest(
+            instrument_id="A",
+            exchange=Exchange.SSE,
+            direction=Direction.LONG,
+            type=OrderType.MARKET,
+            volume=1,
+        )
+        order = engine.gateway.send_order(request)
+        when = datetime(2024, 1, 1)
+        engine.gateway._apply_fill(
+            order,
+            Fill(order.orderid, "A", 10, 1, when),
+        )
+
+        bar = TradeBar(
+            instrument_id="A",
+            exchange=Exchange.SSE,
+            time=when,
+            open=10,
+            high=10,
+            low=10,
+            close=10,
+        )
+        engine.gateway.process_valuation(
+            TimeSlice(
+                time=when,
+                slice=Slice(time=when),
+                valuation_updates=(
+                    ValuationUpdate("A", when, 10, bar),
+                ),
+            )
+        )
+
+        self.assertEqual(len(position_events), 1)
+        self.assertFalse(snapshot_events)
+        self.assertEqual(engine.oms.get_position("A").volume, 1)
+        self.assertEqual(engine.gateway.account_ledger.positions["A"].volume, 1)
 
 
 class _QuietLogger:

@@ -34,11 +34,11 @@ FILLED_LIKE = {OrderStatus.ALLTRADED, OrderStatus.PARTTRADED}
 
 
 class TargetOrder:
-    __slots__ = ("reference", "symbol", "direction", "price", "trigger_price", "volume", "type")
+    __slots__ = ("reference", "instrument_id", "direction", "price", "trigger_price", "volume", "type")
 
-    def __init__(self, reference, symbol, direction, price, trigger_price, volume, type_):
+    def __init__(self, reference, instrument_id, direction, price, trigger_price, volume, type_):
         self.reference = reference
-        self.symbol = symbol
+        self.instrument_id = instrument_id
         self.direction = direction
         self.price = price
         self.trigger_price = trigger_price
@@ -71,7 +71,7 @@ class StrategyBase:
         self._canceling: set[str] = set()  # in-flight cancel 幂等
         self._realign_pending: bool = False  # 置脏标志
         self._reconciling: bool = False  # 防重入
-        self._last_action_at = defaultdict(float)  # 按 (symbol, ref) 限频
+        self._last_action_at = defaultdict(float)  # 按 (instrument_id, ref) 限频
 
         # —— 事件注册：统一对齐入口 ——
     def initialize(self):
@@ -234,7 +234,7 @@ class StrategyBase:
     # ===================== clOrdId / Request 构造 =====================
     def _mk_place_req(self, tgt: TargetOrder) -> OrderRequest:
         return OrderRequest(
-            symbol=tgt.symbol, exchange=self.exchange,
+            instrument_id=tgt.instrument_id, exchange=self.exchange,
             direction=tgt.direction, type=tgt.type,
             price=tgt.price, volume=abs(tgt.volume), trigger_price=tgt.trigger_price,
             reference=tgt.reference
@@ -242,13 +242,17 @@ class StrategyBase:
 
     def _mk_modify_req(self, live: OrderData, tgt: TargetOrder, ) -> ModifyRequest:
         return ModifyRequest(
-            orderid=live.orderid, symbol=tgt.symbol, exchange=self.exchange,
+            orderid=live.orderid, instrument_id=tgt.instrument_id, exchange=self.exchange,
             qty=abs(tgt.volume),
             price=tgt.price, trigger_price=tgt.price
         )
 
     def _mk_cancel_req(self, live: OrderData) -> CancelRequest:
-        return CancelRequest(orderid=live.orderid, symbol=self.vt_symbol, exchange=self.exchange)
+        return CancelRequest(
+            orderid=live.orderid,
+            instrument_id=live.instrument_id,
+            exchange=live.exchange,
+        )
 
     # ===================== 执行（按键限频 + 赛跑幂等） =====================
     def _execute(self, plan: List[Tuple[str, ModifyRequest | OrderRequest | CancelRequest]]):

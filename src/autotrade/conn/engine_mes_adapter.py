@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import zmq
 from autotrade.engine.event_engine import (Event, EventEngine, EVENT_ORDER, EVENT_POSITION, EVENT_ORDER_REQ, EVENT_CANCEL_REQ,
                                            EVENT_MODIFY_REQ, EVENT_LOG)
-from autotrade.engine.oms_engine import OmsBase
+from autotrade.engine.oms import OmsBase
 from autotrade.engine.event_engine import EVENT_COMMAND
 from autotrade.coreutils.constant import Direction,OrderType,LogLevel
 from autotrade.coreutils.object import OrderRequest,ModifyRequest,CancelRequest,LogData
@@ -216,8 +216,8 @@ class EngineMesAdapter:
                 elif cmd == "log.query":
                     self._handle_log_query(data)
                 elif cmd == 'order.modify':
-                    vt_orderid = data.get('vt_orderid')
-                    order = self.oms.get_order(vt_orderid)
+                    orderid = data.get("orderid") or data.get("vt_orderid")
+                    order = self.oms.get_order(orderid)
                     if not order:
                         return
 
@@ -234,27 +234,26 @@ class EngineMesAdapter:
                     if not price:
                         price = order.price
 
-                    req_modify = ModifyRequest(orderid=order.orderid, symbol=order.symbol, qty=qty,
+                    req_modify = ModifyRequest(orderid=order.orderid, instrument_id=order.instrument_id, qty=qty,
                                                trigger_price=trigger_price, price=price, exchange=order.exchange, )
                     self.event_engine.put(Event(EVENT_MODIFY_REQ,req_modify))
 
                 elif cmd == 'order.cancel':
-                    vt_orderid = data.get('vt_orderid')
-                    order = self.oms.get_order(vt_orderid)
+                    orderid = data.get("orderid") or data.get("vt_orderid")
+                    order = self.oms.get_order(orderid)
                     if not order:
                         return
-                    req_cancel = CancelRequest(orderid=order.orderid, symbol=order.symbol, exchange=order.exchange, )
+                    req_cancel = CancelRequest(orderid=order.orderid, instrument_id=order.instrument_id, exchange=order.exchange, )
                     self.event_engine.put(Event(EVENT_CANCEL_REQ,req_cancel))
 
                 elif cmd == 'position.close':
-                    vt_positionid = data.get('vt_positionid')
-                    l_position = [p for p in self.oms.get_all_positions() if p.vt_positionid == vt_positionid]
-                    if not l_position:
+                    instrument_id = data.get("instrument_id")
+                    position = self.oms.get_position(instrument_id)
+                    if position is None:
                         return
-                    position = l_position[0]
                     direction = Direction.LONG if position.direction == Direction.SHORT else Direction.SHORT
 
-                    req_order = OrderRequest(symbol=position.symbol, exchange=position.exchange, direction=direction,
+                    req_order = OrderRequest(instrument_id=position.instrument_id, exchange=position.exchange, direction=direction,
                                              volume=position.volume,
                                              type=OrderType.MARKET, reference='Engine_Close')
                     self.event_engine.put(Event(EVENT_ORDER_REQ,req_order))

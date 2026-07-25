@@ -11,7 +11,7 @@ from autotrade.engine.event_engine import (
 )
 from autotrade.coreutils import Exchange,Product,Direction,OrderStatus
 from autotrade.coreutils import TradeData,TickData,ContractData,PositionData,OrderData,AccountData,QuoteData
-from autotrade.engine.oms_engine import OmsBase
+from autotrade.engine.oms import OmsBase
 from autotrade.engine.security_manager import SecurityManager
 from datetime import datetime
 # 启动 EventEngine 和 OmsBase

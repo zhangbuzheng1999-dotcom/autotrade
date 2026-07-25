@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from autotrade.coreutils.object import TimeSlice
 from autotrade.engine.event_engine import (
     COMMAND_ACCOUNT_VALUATION,
@@ -22,14 +24,14 @@ class TimeSliceDriver:
         self,
         event_engine: EventEngine,
         *,
-        clock=None,
         simulated_broker: bool = False,
         source: str = "timeslice_driver",
+        context: Any | None = None,
     ) -> None:
         self.event_engine = event_engine
-        self.clock = clock
         self.simulated_broker = simulated_broker
         self.source = source
+        self.context = context
 
     def process(self, time_slice: TimeSlice) -> None:
         if not isinstance(time_slice, TimeSlice):
@@ -37,11 +39,8 @@ class TimeSliceDriver:
                 f"TimeSliceDriver expects TimeSlice, got "
                 f"{type(time_slice).__name__}"
             )
-        if self.clock is not None and time_slice.time is not None:
-            advance = getattr(self.clock, "advance", None)
-            if advance is not None:
-                advance(time_slice.time)
-
+        if self.context is not None:
+            self.context.current_time = time_slice.time
         for update in time_slice.security_updates:
             self.event_engine.put(Event(EVENT_DATA, update))
 

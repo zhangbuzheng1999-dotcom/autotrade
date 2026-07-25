@@ -1,2 +1,0 @@
-[console_scripts]
-autotrade-ws = autotrade.conn.ws_hub:main

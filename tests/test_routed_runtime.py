@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime
 
-from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+from autotrade.backtest.event_engine import BacktestEventEngine
 from autotrade.backtest.backtest_engine import BacktestEngine
 from autotrade.coreutils.constant import Direction, Exchange, OrderType
 from autotrade.coreutils.object import (
@@ -24,13 +24,52 @@ from autotrade.engine.event_engine import (
     Message,
     MessageKind,
 )
-from autotrade.engine.live_timeslice_builder import LiveTimeSliceBuilder
+from autotrade.engine.data_manager import LiveDataManager
+from autotrade.engine.live_engine import LiveEngine
 from autotrade.engine.order_router import OrderRouter
+from autotrade.engine.runtime_engine import RuntimeEngine
 from autotrade.engine.security_manager import SecurityManager
 from autotrade.engine.timeslice_driver import TimeSliceDriver
 
 
 class RoutedRuntimeTests(unittest.TestCase):
+    def test_live_and_backtest_expose_the_same_runtime_component_shape(self):
+        event_engine = BacktestEventEngine()
+        gateway = _DummyLiveGateway(event_engine)
+        live = LiveEngine(
+            event_engine=event_engine,
+            gateway=gateway,
+            logger=_QuietLogger(),
+        )
+        backtest = BacktestEngine(logger=_QuietLogger())
+
+        self.assertIsInstance(live, RuntimeEngine)
+        self.assertIsInstance(backtest, RuntimeEngine)
+        self.assertEqual(
+            set(live.components.__dataclass_fields__),
+            set(backtest.components.__dataclass_fields__),
+        )
+        self.assertIs(live.data_manager.driver, live.timeslice_driver)
+        self.assertIs(live.security_manager.event_engine, live.event_engine)
+
+        request = OrderRequest(
+            instrument_id="A",
+            exchange=Exchange.SSE,
+            direction=Direction.LONG,
+            type=OrderType.MARKET,
+            volume=1,
+        )
+        event_engine.put(
+            Message(
+                MessageKind.COMMAND,
+                COMMAND_ORDER_SUBMIT,
+                request,
+                source="strategy.test",
+                target="order_router",
+            )
+        )
+        self.assertEqual(gateway.submitted, [request])
+
     def test_command_routes_to_exact_target(self):
         engine = BacktestEventEngine()
         received = []
@@ -75,7 +114,7 @@ class RoutedRuntimeTests(unittest.TestCase):
         )
         when = datetime(2024, 1, 1)
         bar = TradeBar(
-            symbol="A",
+            instrument_id="A",
             time=when,
             open=1,
             high=1,
@@ -102,7 +141,7 @@ class RoutedRuntimeTests(unittest.TestCase):
     def test_live_input_updates_security_before_strategy_slice(self):
         engine = BacktestEventEngine()
         securities = SecurityManager(engine)
-        LiveTimeSliceBuilder(engine)
+        LiveDataManager(engine)
         observed_prices = []
         engine.register(
             EVENT_SLICE,
@@ -115,7 +154,7 @@ class RoutedRuntimeTests(unittest.TestCase):
         )
         tick = TickData(
             gateway_name="LIVE",
-            symbol="A",
+            instrument_id="A",
             exchange=Exchange.SSE,
             datetime=datetime(2024, 1, 1),
             last_price=10,
@@ -125,7 +164,7 @@ class RoutedRuntimeTests(unittest.TestCase):
 
         self.assertEqual(observed_prices, [(10, 10)])
 
-    def test_live_builder_and_backtest_feed_share_timeslice_driver_contract(self):
+    def test_live_and_backtest_data_managers_share_timeslice_driver_contract(self):
         engine = BacktestEventEngine()
         received = []
 
@@ -133,16 +172,16 @@ class RoutedRuntimeTests(unittest.TestCase):
             def process(self, time_slice):
                 received.append(time_slice)
 
-        builder = LiveTimeSliceBuilder(engine, driver=RecordingDriver())
+        manager = LiveDataManager(engine, driver=RecordingDriver())
         tick = TickData(
             gateway_name="LIVE",
-            symbol="A",
+            instrument_id="A",
             exchange=Exchange.SSE,
             datetime=datetime(2024, 1, 1),
             last_price=10,
         )
 
-        built = builder.push(tick)
+        built = manager.push(tick)
 
         self.assertIs(received[0], built)
         self.assertIsInstance(received[0], TimeSlice)
@@ -154,7 +193,7 @@ class RoutedRuntimeTests(unittest.TestCase):
         slices = []
         engine.register(EVENT_SLICE, lambda event: slices.append(event.data))
         bar = TradeBar(
-            symbol="A",
+            instrument_id="A",
             time=datetime(2024, 1, 1),
             open=1,
             high=1,
@@ -176,7 +215,7 @@ class RoutedRuntimeTests(unittest.TestCase):
             lambda message: received.append(message.data),
         )
         request = OrderRequest(
-            symbol="A",
+            instrument_id="A",
             exchange=Exchange.SSE,
             direction=Direction.LONG,
             type=OrderType.MARKET,
@@ -198,7 +237,7 @@ class RoutedRuntimeTests(unittest.TestCase):
     def test_backtest_gateway_consumes_same_order_command(self):
         engine = BacktestEngine(logger=_QuietLogger())
         request = OrderRequest(
-            symbol="A",
+            instrument_id="A",
             exchange=Exchange.SSE,
             direction=Direction.LONG,
             type=OrderType.MARKET,
@@ -230,6 +269,37 @@ class _QuietLogger:
         pass
 
     def error(self, _message):
+        pass
+
+
+class _DummyLiveGateway:
+    def __init__(self, event_engine):
+        self.event_engine = event_engine
+        self.submitted = []
+
+    def bind_execution(self):
+        self.event_engine.register_command(
+            "execution",
+            COMMAND_ORDER_SUBMIT,
+            lambda message: self.send_order(message.data),
+        )
+
+    def unbind_execution(self):
+        pass
+
+    def connect(self, _setting):
+        pass
+
+    def close(self):
+        pass
+
+    def send_order(self, request):
+        self.submitted.append(request)
+
+    def cancel_order(self, _request):
+        pass
+
+    def modify_order(self, _request):
         pass
 
 

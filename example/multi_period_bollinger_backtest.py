@@ -52,52 +52,52 @@ class MultiPeriodBollingerStrategy(StrategyBase):
         self.window = window
         self.band_width = band_width
         self.max_position = max_position
-        self.five_minute_closes = {symbol: deque(maxlen=window) for symbol in symbols}
+        self.five_minute_closes = {instrument_id: deque(maxlen=window) for instrument_id in symbols}
         self.positions = defaultdict(int)
         self.pending = defaultdict(bool)
         self.orders_seen = 0
         self.trades_seen = 0
 
     def on_data(self, slice_) -> None:
-        for symbol in self.symbols:
-            fast_bar = slice_.get_bar(symbol, "1m")
-            slow_bar = slice_.get_bar(symbol, "5m")
+        for instrument_id in self.symbols:
+            fast_bar = slice_.get_bar(instrument_id, "1m")
+            slow_bar = slice_.get_bar(instrument_id, "5m")
             if slow_bar is not None:
-                self.five_minute_closes[symbol].append(slow_bar.close)
+                self.five_minute_closes[instrument_id].append(slow_bar.close)
             if fast_bar is None:
                 continue
 
-            closes = self.five_minute_closes[symbol]
-            if len(closes) < self.window or self.pending[symbol]:
+            closes = self.five_minute_closes[instrument_id]
+            if len(closes) < self.window or self.pending[instrument_id]:
                 continue
 
             mean = fmean(closes)
             sigma = pstdev(closes) or 1e-9
             upper = mean + self.band_width * sigma
             lower = mean - self.band_width * sigma
-            position = self.positions[symbol]
+            position = self.positions[instrument_id]
 
             if fast_bar.close < lower and position < self.max_position:
-                self._send_market_order(symbol, fast_bar.exchange, Direction.LONG)
+                self._send_market_order(instrument_id, fast_bar.exchange, Direction.LONG)
             elif fast_bar.close > upper and position > -self.max_position:
-                self._send_market_order(symbol, fast_bar.exchange, Direction.SHORT)
+                self._send_market_order(instrument_id, fast_bar.exchange, Direction.SHORT)
 
     def on_order(self, order: OrderData):
         self.orders_seen += 1
         if order.status in {OrderStatus.ALLTRADED, OrderStatus.ALLCANCELLED, OrderStatus.REJECTED}:
-            self.pending[order.symbol] = False
+            self.pending[order.instrument_id] = False
 
     def on_trade(self, trade: TradeData):
         self.trades_seen += 1
         signed_volume = int(trade.volume) if trade.direction == Direction.LONG else -int(trade.volume)
-        self.positions[trade.symbol] += signed_volume
-        self.pending[trade.symbol] = False
+        self.positions[trade.instrument_id] += signed_volume
+        self.pending[trade.instrument_id] = False
 
-    def _send_market_order(self, symbol: str, exchange: Exchange | None, direction: Direction) -> None:
-        self.pending[symbol] = True
+    def _send_market_order(self, instrument_id: str, exchange: Exchange | None, direction: Direction) -> None:
+        self.pending[instrument_id] = True
         self.push_order_request(
             OrderRequest(
-                symbol=symbol,
+                instrument_id=instrument_id,
                 exchange=exchange or Exchange.SSE,
                 direction=direction,
                 type=OrderType.MARKET,
@@ -116,7 +116,7 @@ def make_multi_asset_bars(
     minute_rows = []
     five_minute_rows = []
 
-    for symbol_index, symbol in enumerate(symbols):
+    for symbol_index, instrument_id in enumerate(symbols):
         base = 100 + symbol_index * 15
         previous_close = base
         symbol_minute_rows = []
@@ -136,7 +136,7 @@ def make_multi_asset_bars(
             high = max(open_, close) + 0.35
             low = min(open_, close) - 0.35
             row = {
-                "symbol": symbol,
+                "instrument_id": instrument_id,
                 "time": when,
                 "open": open_,
                 "high": high,
@@ -152,7 +152,7 @@ def make_multi_asset_bars(
             chunk = symbol_minute_rows[offset - 4 : offset + 1]
             five_minute_rows.append(
                 {
-                    "symbol": symbol,
+                    "instrument_id": instrument_id,
                     "time": chunk[-1]["time"],
                     "open": chunk[0]["open"],
                     "high": max(item["high"] for item in chunk),
@@ -162,7 +162,7 @@ def make_multi_asset_bars(
                 }
             )
 
-    sort_columns = ["time", "symbol"]
+    sort_columns = ["time", "instrument_id"]
     return (
         pd.DataFrame(minute_rows).sort_values(sort_columns).reset_index(drop=True),
         pd.DataFrame(five_minute_rows).sort_values(sort_columns).reset_index(drop=True),
@@ -189,7 +189,7 @@ def main() -> None:
         EquityStateReader().read(
             pd.DataFrame(
                 {
-                    "symbol": SYMBOLS,
+                    "instrument_id": SYMBOLS,
                     "multiplier": 1,
                     "margin_rate": 0.1,
                 }
@@ -230,7 +230,7 @@ def main() -> None:
     print("oms_trades:", len(engine.oms.trade_log))
     print("account_snapshots:", len(engine.account_daily))
     print("final_equity:", list(engine.account_daily.values())[-1]["equity"])
-    print("positions:", {symbol: pos.volume for symbol, pos in engine.oms.positions.items()})
+    print("positions:", {instrument_id: pos.volume for instrument_id, pos in engine.oms.positions.items()})
 
     assert engine.processed_slice_count == len(minute_bars["time"].unique())
     assert engine.symbols == SYMBOLS

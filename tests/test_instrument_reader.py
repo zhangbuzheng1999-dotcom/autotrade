@@ -11,12 +11,12 @@ class InstrumentReaderTests(unittest.TestCase):
 
     def test_undated_instrument_without_lifecycle_remains_bootstrap(self):
         frame = pd.DataFrame(
-            [{"symbol": "AAA", "multiplier": 1}]
+            [{"instrument_id": "AAA", "multiplier": 1}]
         )
 
         result = self.read(frame)
 
-        self.assertEqual([state.symbol for state in result], ["AAA"])
+        self.assertEqual([state.instrument_id for state in result], ["AAA"])
         self.assertIsNone(result[0].time)
         self.assertTrue(result[0].is_active)
 
@@ -24,7 +24,7 @@ class InstrumentReaderTests(unittest.TestCase):
         frame = pd.DataFrame(
             [
                 {
-                    "symbol": "A",
+                    "instrument_id": "A",
                     "multiplier": 10,
                     "list_date": "2015-01-01",
                     "delist_date": "2015-01-20",
@@ -44,8 +44,8 @@ class InstrumentReaderTests(unittest.TestCase):
     def test_dated_instrument_without_lifecycle_keeps_input_states(self):
         frame = pd.DataFrame(
             [
-                {"date": "2015-01-01", "symbol": "A", "multiplier": 10},
-                {"date": "2015-01-09", "symbol": "A", "multiplier": 5},
+                {"date": "2015-01-01", "instrument_id": "A", "multiplier": 10},
+                {"date": "2015-01-09", "instrument_id": "A", "multiplier": 5},
             ]
         )
 
@@ -60,14 +60,14 @@ class InstrumentReaderTests(unittest.TestCase):
             [
                 {
                     "date": "2015-01-01",
-                    "symbol": "A",
+                    "instrument_id": "A",
                     "list_date": "2015-01-01",
                     "delist_date": "2015-01-20",
                     "multiplier": 10,
                 },
                 {
                     "date": "2015-01-09",
-                    "symbol": "A",
+                    "instrument_id": "A",
                     "list_date": "2015-01-01",
                     "delist_date": "2015-01-20",
                     "multiplier": 5,

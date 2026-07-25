@@ -14,7 +14,7 @@ Instrument Reader 输出完整状态快照，不创建运行时 Security。
 ### Instrument Reader 内部标准化
 
 这是 Instrument Reader 的私有步骤，不属于公共 API。它保证信息表存在
-`date`、`symbol`、`is_active`：
+`date`、`instrument_id`、`is_active`：
 
 - 无日期且无生命周期：保留 `date=NaT`，作为 bootstrap。
 - 有 `list_date`：生成生效事件。
@@ -70,14 +70,16 @@ InstrumentStateData 更新合约属性和生命周期；Bar、Tick、Quote 更�
 `EVENT_ORDER`、`EVENT_TRADE`、`EVENT_ACCOUNT`、`EVENT_QUOTE` 以及券商持仓快照；
 成交更新持仓后由 OMS 发布 `EVENT_POSITION`。
 
-`BacktestGateway` 是模拟券商门面，内部组合 OrderBook、MatchingEngine、
-AccountLedger、CommissionModel、MarginModel 和 EventPublisher。它负责模拟订单、
-成交、持仓、手续费、保证金和账户估值，并发布与实盘 Gateway 相同的订单、成交、
-持仓快照和账户事件。合约参数始终直接读取共享 SecurityManager。
+`BacktestGateway` 是模拟券商门面，和 OrderBook、MatchingEngine、AccountLedger、
+CommissionModel、MarginModel、EventPublisher 一起收敛在 `backtest/gateway.py`。
+它负责模拟订单、成交、手续费、保证金和账户估值，并发布与实盘 Gateway 相同的
+订单、成交和账户事件。普通成交由共享 OMS 投影持仓；持仓快照只用于显式对账。
+合约参数始终直接读取共享 SecurityManager。
 
 ### Recorder 与 Analyzer
 
-`BacktestRecorder` 是模拟券商的内部协作者。当且仅当 TimeSlice 包含
+`BacktestRecorder` 和 `PerformanceAnalyzer` 收敛在 `backtest/reporting.py`。
+Recorder 是模拟券商的内部协作者。当且仅当 TimeSlice 包含
 `valuation_updates` 时，AccountLedger 才完成盯市，Gateway 随后发布账户并立即记录
 快照；Tick 或其他非估值数据不会产生账户历史。Recorder 不参与资金或持仓计算。
 `PerformanceAnalyzer` 对 Recorder 的历史快照做纯统计，不持有运行时交易状态。
@@ -108,14 +110,55 @@ market after、valuation 中每个阶段及其派生事件处理完成后才进�
 BacktestGateway 通过发送给 `simulated_broker` 的 Command 接收撮合和估值阶段，
 BacktestEngine 不再直接调用其业务方法。
 
+实盘和回测现在都通过共享 `RuntimeEngine` 表达同一套组件清单：
+
+```text
+RuntimeComponents
+├── EventEngine
+├── SecurityManager
+├── OmsBase
+├── OrderRouter
+├── TimeSliceDriver
+├── Gateway
+└── LogEngine
+```
+
+`LiveEngine` 使用异步 EventEngine、实盘 Gateway 和 LiveDataManager；
+`BacktestEngine` 使用同步 BacktestEventEngine、BacktestGateway 和有限 TimeSlice
+迭代器。两者不互相继承，而是使用相同 RuntimeEngine 模板显式组装。
+
+日志由共享 `LogEngine` 订阅 `EVENT_LOG`，当前运行时间由 TimeSliceDriver 写入
+`RuntimeContext`。RuntimeContext 只记录上下文，不推动时间。回测记录导出和绩效
+统计由 `BacktestReporting` 负责，不再由 BacktestEngine 自己处理日志或指标公式。
+
+共享 engine 目录按组件边界组织：
+
+```text
+engine/
+├── event_engine.py
+├── security_manager.py
+├── oms.py
+├── order_router.py
+├── timeslice_driver.py
+├── log_engine.py
+├── runtime_engine.py
+├── data_manager.py
+├── live_engine.py
+└── rollover_manager.py
+```
+
+旧 CtaEngine 已被 LiveEngine、OrderRouter 和独立 RolloverManager 取代，因此不再
+保留重复的 `trade_engine.py`。
+
 ## 实盘与回测共享协议
 
 策略、移仓和外部模块统一向 `order_router` 发送 `order.submit`、`order.cancel`、
 `order.modify` Command；OrderRouter 完成开关和 mute 检查后转发给逻辑目标
-`execution`。实盘 Gateway 与 BacktestGateway 绑定同一执行能力，订单、成交、
+`execution`。实盘 Gateway 与 BacktestGateway 自己绑定并消费该执行能力，
+LiveEngine 和 BacktestEngine 不转发或解释交易请求。订单、成交、
 持仓和账户结果继续通过广播事件进入共享 OmsBase。
 
-实盘 Gateway 将原始回调发布为 `EVENT_LIVE_DATA`，`LiveTimeSliceBuilder` 将 Tick、
+实盘 Gateway 将原始回调发布为 `EVENT_LIVE_DATA`，`LiveDataManager` 将 Tick、
 Bar 和多数据源批次标准化为 TimeSlice，再交给同一个 TimeSliceDriver。策略只订阅
 `EVENT_SLICE`。实盘 EventEngine 异步入队，BacktestEventEngine 同步排空；消息路由、
 模块和数据对象保持一致。

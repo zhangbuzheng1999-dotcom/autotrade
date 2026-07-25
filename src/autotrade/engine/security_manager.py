@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 class SecurityManager:
-    """Create and maintain the single authoritative Security per symbol."""
+    """Create and maintain the single authoritative Security per instrument_id."""
 
     def __init__(
         self,
@@ -67,22 +67,22 @@ class SecurityManager:
 
     def add(
         self,
-        symbol: str,
+        instrument_id: str,
         *,
         exchange: Exchange | None = None,
     ) -> Security:
-        security = self.securities.get(symbol)
+        security = self.securities.get(instrument_id)
         if security is None:
             security = Security(
-                symbol=symbol,
+                instrument_id=instrument_id,
                 time=datetime.min,
                 exchange=exchange,
             )
-            self.securities[symbol] = security
+            self.securities[instrument_id] = security
         return security
 
-    def get(self, symbol: str) -> Security | None:
-        return self.securities.get(symbol)
+    def get(self, instrument_id: str) -> Security | None:
+        return self.securities.get(instrument_id)
 
     def on_data(
         self,
@@ -94,7 +94,7 @@ class SecurityManager:
         if isinstance(data, ContractData):
             self._apply_instrument_state(
                 InstrumentStateData(
-                    symbol=data.symbol,
+                    instrument_id=data.instrument_id,
                     time=None,
                     is_active=True,
                     exchange=data.exchange,
@@ -112,7 +112,7 @@ class SecurityManager:
         if isinstance(data, TickData):
             has_quote = data.bid_price_1 > 0 or data.ask_price_1 > 0
             data = Tick(
-                symbol=data.symbol,
+                instrument_id=data.instrument_id,
                 exchange=data.exchange,
                 time=data.datetime,
                 tick_type="quote" if has_quote else "trade",
@@ -126,7 +126,7 @@ class SecurityManager:
             )
         elif isinstance(data, BarData):
             data = TradeBar(
-                symbol=data.symbol,
+                instrument_id=data.instrument_id,
                 exchange=data.exchange,
                 time=data.datetime,
                 interval=data.interval,
@@ -141,7 +141,7 @@ class SecurityManager:
             )
         if not isinstance(data, MarketData):
             raise TypeError(f"unsupported security data type: {type(data).__name__}")
-        self.add(data.symbol).update_market(data)
+        self.add(data.instrument_id).update_market(data)
 
     def on_timeslice(self, time_slice: "TimeSlice") -> None:
         for update in time_slice.security_updates:
@@ -149,29 +149,29 @@ class SecurityManager:
 
     def _apply_instrument_state(self, state: InstrumentStateData) -> None:
         security_type = _security_type_for_state(state)
-        security = self.securities.get(state.symbol)
+        security = self.securities.get(state.instrument_id)
         if security is None:
             security = security_type(
-                symbol=state.symbol,
+                instrument_id=state.instrument_id,
                 time=state.time or datetime.min,
                 exchange=state.exchange,
             )
-            self.securities[state.symbol] = security
+            self.securities[state.instrument_id] = security
         elif not isinstance(security, security_type):
             if type(security) is not Security:
                 raise TypeError(
-                    f"cannot change asset type for {state.symbol!r} from "
+                    f"cannot change asset type for {state.instrument_id!r} from "
                     f"{type(security).__name__} to {security_type.__name__}"
                 )
             security = _upgrade_security(security, security_type)
-            self.securities[state.symbol] = security
+            self.securities[state.instrument_id] = security
         security.apply_state(state)
 
-    def __contains__(self, symbol: str) -> bool:
-        return symbol in self.securities
+    def __contains__(self, instrument_id: str) -> bool:
+        return instrument_id in self.securities
 
-    def __getitem__(self, symbol: str) -> Security:
-        return self.securities[symbol]
+    def __getitem__(self, instrument_id: str) -> Security:
+        return self.securities[instrument_id]
 
     def items(self):
         return self.securities.items()
@@ -179,8 +179,8 @@ class SecurityManager:
     def values(self):
         return self.securities.values()
 
-    def get_tick(self, symbol: str):
-        security = self.get(symbol)
+    def get_tick(self, instrument_id: str):
+        security = self.get(instrument_id)
         if security is None:
             return None
         source = security.source
@@ -188,9 +188,9 @@ class SecurityManager:
             return source.metadata.get("legacy_source", source)
         return None
 
-    def get_contract(self, symbol: str) -> Security | None:
+    def get_contract(self, instrument_id: str) -> Security | None:
         """Return the canonical Security instead of a duplicate contract cache."""
-        return self.get(symbol)
+        return self.get(instrument_id)
 
 
 def _security_type_for_state(state: InstrumentStateData) -> type[Security]:
@@ -208,7 +208,7 @@ def _upgrade_security(
     security_type: type[Security],
 ) -> Security:
     upgraded = security_type(
-        symbol=security.symbol,
+        instrument_id=security.instrument_id,
         time=security.time,
         value=security.value,
         exchange=security.exchange,

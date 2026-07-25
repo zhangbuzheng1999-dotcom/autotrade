@@ -89,7 +89,7 @@ class RolloverManager:
         for t in list(self.tasks.values()):
             if t.phase in (Phase.DONE, Phase.FAILED):
                 continue
-            if od.symbol not in (t.old_symbol, t.new_symbol, t.symbol_group):
+            if od.instrument_id not in (t.old_symbol, t.new_symbol, t.symbol_group):
                 continue
 
             # 清场阶段：订单结果
@@ -117,10 +117,10 @@ class RolloverManager:
         for t in list(self.tasks.values()):
             if t.phase not in (Phase.AWAIT_POS, Phase.WAIT_CANCEL):
                 continue
-            if pos.symbol not in (t.old_symbol, t.new_symbol):
+            if pos.instrument_id not in (t.old_symbol, t.new_symbol):
                 continue
 
-            if pos.symbol == t.old_symbol:
+            if pos.instrument_id == t.old_symbol:
                 t.pos_seen = True
             if t.exchange is None and pos.exchange:
                 t.exchange = pos.exchange
@@ -196,7 +196,7 @@ class RolloverManager:
     def _send_open_new(self, t: Task, vol: float, dire: Direction):
         ref = f"ROLL:{t.symbol_group}:{t.old_symbol}->{t.new_symbol}:OPEN"
         req = OrderRequest(
-            symbol=t.new_symbol, exchange=t.exchange, direction=dire,
+            instrument_id=t.new_symbol, exchange=t.exchange, direction=dire,
             type=OrderType.MARKET, price=0, volume=float(vol),
             trigger_price=0, reference=ref
         )
@@ -209,7 +209,7 @@ class RolloverManager:
         close_dir = Direction.LONG if dire == Direction.SHORT else Direction.SHORT
         ref = f"ROLL:{t.symbol_group}:{t.old_symbol}->{t.new_symbol}:CLOSE"
         req = OrderRequest(
-            symbol=t.old_symbol, exchange=t.exchange, direction=close_dir,
+            instrument_id=t.old_symbol, exchange=t.exchange, direction=close_dir,
             type=OrderType.MARKET, price=0, volume=float(vol),
             trigger_price=0, reference=ref
         )
@@ -236,9 +236,9 @@ class RolloverManager:
         impacted = {t.symbol_group, t.old_symbol, t.new_symbol}
         for o in self.oms.get_all_active_orders():
             ref = o.reference or ""
-            if (o.symbol in impacted) and (not ref.startswith("ROLL:")):
+            if (o.instrument_id in impacted) and (not ref.startswith("ROLL:")):
                 self._send_order_command(COMMAND_ORDER_CANCEL, CancelRequest(
-                    orderid=o.orderid, symbol=o.symbol, exchange=o.exchange
+                    orderid=o.orderid, instrument_id=o.instrument_id, exchange=o.exchange
                 ))
 
     def _send_order_command(self, name: str, request) -> None:
@@ -256,12 +256,12 @@ class RolloverManager:
         impacted = {t.symbol_group, t.old_symbol, t.new_symbol}
         for o in self.oms.get_all_active_orders():
             ref = o.reference or ""
-            if o.symbol in impacted and (not ref.startswith("ROLL:")) and o.is_active():
+            if o.instrument_id in impacted and (not ref.startswith("ROLL:")) and o.is_active():
                 return True
         return False
 
-    def _calc_net_pos(self, symbol: str) -> Tuple[float, Optional[Direction]]:
-        pos = self.oms.get_position(symbol)
+    def _calc_net_pos(self, instrument_id: str) -> Tuple[float, Optional[Direction]]:
+        pos = self.oms.get_position(instrument_id)
         if not pos or pos.volume <= 0:
             return 0.0, None
         return float(pos.volume), pos.direction

@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
 from autotrade.engine.event_engine import Event, EventEngine
 from autotrade.engine.event_engine import (
+    COMMAND_ORDER_CANCEL,
+    COMMAND_ORDER_MODIFY,
+    COMMAND_ORDER_SUBMIT,
     EVENT_LIVE_DATA,
     EVENT_ORDER,
     EVENT_TRADE,
@@ -8,6 +11,7 @@ from autotrade.engine.event_engine import (
     EVENT_ACCOUNT,
     EVENT_LOG,
     EVENT_QUOTE,
+    Message,
 )
 from autotrade.coreutils.object import (
     TickData,
@@ -80,6 +84,7 @@ class BaseGateway(ABC):
         """"""
         self.event_engine: EventEngine = event_engine
         self.gateway_name: str = gateway_name
+        self._execution_bound = False
 
     def on_event(self, type: str, data: object = None) -> None:
         """
@@ -88,46 +93,62 @@ class BaseGateway(ABC):
         event: Event = Event(type, data)
         self.event_engine.put(event)
 
+    @property
+    def execution_routes(self):
+        """Commands consumed directly by every trading gateway."""
+        return (
+            (COMMAND_ORDER_SUBMIT, self._process_order_command),
+            (COMMAND_ORDER_CANCEL, self._process_cancel_command),
+            (COMMAND_ORDER_MODIFY, self._process_modify_command),
+        )
+
+    def bind_execution(self) -> None:
+        if self._execution_bound:
+            return
+        for name, handler in self.execution_routes:
+            self.event_engine.register_command("execution", name, handler)
+        self._execution_bound = True
+
+    def unbind_execution(self) -> None:
+        if not self._execution_bound:
+            return
+        for name, handler in self.execution_routes:
+            self.event_engine.unregister_command("execution", name, handler)
+        self._execution_bound = False
+
+    def _process_order_command(self, message: Message) -> None:
+        self.send_order(message.data)
+
+    def _process_cancel_command(self, message: Message) -> None:
+        self.cancel_order(message.data)
+
+    def _process_modify_command(self, message: Message) -> None:
+        self.modify_order(message.data)
+
 
     def on_tick(self, tick: TickData) -> None:
         """Publish market data through the unified data event."""
         self.on_event(EVENT_LIVE_DATA, tick)
 
     def on_trade(self, trade: TradeData) -> None:
-        """
-        Trade event push.
-        Trade event of a specific vt_symbol is also pushed.
-        """
+        """Publish a confirmed fill."""
         self.on_event(EVENT_TRADE, trade)
-        self.on_event(EVENT_TRADE + trade.vt_symbol, trade)
 
     def on_order(self, order: OrderData) -> None:
-        """
-        Order event push.
-        Order event of a specific vt_orderid is also pushed.
-        """
+        """Publish the latest order state."""
         self.on_event(EVENT_ORDER, order)
-        self.on_event(EVENT_ORDER + order.vt_orderid, order)
 
     def on_position(self, position: PositionData) -> None:
         """Publish a broker position snapshot for OMS reconciliation."""
         self.on_event(EVENT_POSITION_SNAPSHOT, position)
 
     def on_account(self, account: AccountData) -> None:
-        """
-        Account event push.
-        Account event of a specific vt_accountid is also pushed.
-        """
+        """Publish the latest account state."""
         self.on_event(EVENT_ACCOUNT, account)
-        self.on_event(EVENT_ACCOUNT + account.vt_accountid, account)
 
     def on_quote(self, quote: QuoteData) -> None:
-        """
-        Quote event push.
-        Quote event of a specific vt_symbol is also pushed.
-        """
+        """Publish the latest quote state."""
         self.on_event(EVENT_QUOTE, quote)
-        self.on_event(EVENT_QUOTE + quote.vt_symbol, quote)
 
     def on_log(self, log: LogData) -> None:
         """
@@ -194,9 +215,9 @@ class BaseGateway(ABC):
             * if request is sent, OrderData.status should be set to Status.SUBMITTING
             * if request is failed to sent, OrderData.status should be set to Status.REJECTED
         * response on_order:
-        * return vt_orderid
+        * return orderid
 
-        :return str vt_orderid for created OrderData
+        :return local orderid for created OrderData
         """
         pass
 
@@ -223,9 +244,9 @@ class BaseGateway(ABC):
             * if request is sent, QuoteData.status should be set to Status.SUBMITTING
             * if request is failed to sent, QuoteData.status should be set to Status.REJECTED
         * response on_quote:
-        * return vt_quoteid
+        * return quoteid
 
-        :return str vt_quoteid for created QuoteData
+        :return local quoteid for created QuoteData
         """
         return ""
 

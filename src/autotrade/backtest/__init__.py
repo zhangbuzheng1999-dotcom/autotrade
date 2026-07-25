@@ -1,13 +1,9 @@
 """TimeSlice-driven backtesting components."""
 
 from .backtest_engine import BacktestEngine
-from .backtest_recorder import BacktestRecorder
-from .account_ledger import AccountLedger
-from .commission_model import CommissionModel
-from .margin_model import MarginModel
-from .matching_engine import MatchingEngine
-from .performance_analyzer import PerformanceAnalyzer
-from .backtest_event_engine import (
+from .data import DataManager
+from .reporting import BacktestRecorder, BacktestReporting, PerformanceAnalyzer
+from .event_engine import (
     EVENT_DATA,
     EVENT_SLICE,
     EVENT_REQUEST,
@@ -15,19 +11,25 @@ from .backtest_event_engine import (
     BacktestEventEngine,
     Event,
 )
-from .backtest_gateway import (
+from .gateway import (
+    AccountLedger,
     BacktestGateway,
     BacktestSettings,
     BarFillModel,
+    CommissionModel,
     Fill,
     FillContext,
     FillModel,
+    MarginModel,
+    MatchingEngine,
 )
 from autotrade.engine.security_manager import SecurityManager
 
 __all__ = [
     "BacktestEngine",
+    "DataManager",
     "BacktestRecorder",
+    "BacktestReporting",
     "AccountLedger",
     "CommissionModel",
     "BacktestEventEngine",

@@ -1,6 +1,6 @@
 """Clean end-time data pipeline for autotrade backtests."""
 
-from .manager import DataManager
+from .data_manager import DataManager
 from .reader import (
     CustomDataReader,
     DataReader,

@@ -27,7 +27,7 @@ class TradeBarReader(DataReader):
         frame = self.frame(source)
         mapping = self.schema_resolver.resolve(
             frame,
-            required=("symbol", "time", "open", "high", "low", "close"),
+            required=("instrument_id", "time", "open", "high", "low", "close"),
             optional=("volume", "turnover", "open_interest"),
             schema=self.schema,
         )
@@ -36,7 +36,7 @@ class TradeBarReader(DataReader):
         def records():
             for row in frame.itertuples(index=False):
                 yield TradeBar(
-                    symbol=str(get(row, mapping["symbol"])),
+                    instrument_id=str(get(row, mapping["instrument_id"])),
                     exchange=exchange,
                     time=to_datetime(get(row, mapping["time"])),
                     interval=interval,
@@ -67,7 +67,7 @@ class TickReader(DataReader):
         frame = self.frame(source)
         mapping = self.schema_resolver.resolve(
             frame,
-            required=("symbol", "time"),
+            required=("instrument_id", "time"),
             optional=("price", "quantity", "bid", "ask", "bid_size", "ask_size"),
             schema=self.schema,
         )
@@ -76,7 +76,7 @@ class TickReader(DataReader):
         def records():
             for row in frame.itertuples(index=False):
                 yield Tick(
-                    symbol=str(get(row, mapping["symbol"])),
+                    instrument_id=str(get(row, mapping["instrument_id"])),
                     exchange=exchange,
                     time=to_datetime(get(row, mapping["time"])),
                     tick_type=tick_type,
@@ -104,13 +104,13 @@ class CustomDataReader(DataReader):
         frame = self.frame(source)
         mapping = self.schema_resolver.resolve(
             frame,
-            required=("symbol", "time"),
+            required=("instrument_id", "time"),
             optional=("value",),
             schema=self.schema,
         )
         get = row_getter(frame)
         standard_columns = {
-            mapping["symbol"],
+            mapping["instrument_id"],
             mapping["time"],
             mapping.get("value"),
         }
@@ -123,7 +123,7 @@ class CustomDataReader(DataReader):
                     if column not in standard_columns
                 }
                 yield CustomData(
-                    symbol=str(get(row, mapping["symbol"])),
+                    instrument_id=str(get(row, mapping["instrument_id"])),
                     exchange=exchange,
                     time=to_datetime(get(row, mapping["time"])),
                     value=float_or_none(get(row, mapping.get("value"))),

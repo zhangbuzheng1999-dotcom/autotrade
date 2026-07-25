@@ -11,11 +11,11 @@ import pandas as pd
 
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "symbol": (
-        "symbol",
-        "order_book_id",
-        "instrument",
+    "instrument_id": (
         "instrument_id",
+        "order_book_id",
+        "symbol",
+        "instrument",
         "code",
         "ticker",
     ),
@@ -44,8 +44,18 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "long_commission_rate": ("long_commission_rate", "long_rate"),
     "short_commission_rate": ("short_commission_rate", "short_rate"),
     "expiry": ("expiry", "expiry_date", "maturity_date", "maturity"),
-    "root_symbol": ("root_symbol", "product", "underlying"),
-    "underlying_symbol": ("underlying_symbol", "underlying", "underlier"),
+    "root_instrument_id": (
+        "root_instrument_id",
+        "root_symbol",
+        "product",
+        "underlying",
+    ),
+    "underlying_instrument_id": (
+        "underlying_instrument_id",
+        "underlying_symbol",
+        "underlying",
+        "underlier",
+    ),
     "strike": ("strike", "strike_price", "exercise_price"),
     "right": ("right", "option_type", "call_put"),
     "style": ("style", "exercise_style"),

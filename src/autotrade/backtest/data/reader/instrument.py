@@ -5,7 +5,7 @@ It normalizes the three columns shared by every instrument state:
 ``date``
     Effective time of the state. ``NaT`` means bootstrap state and must not be
     sent to the chronological data synchronizer.
-``symbol``
+``instrument_id``
     Canonical instrument identifier.
 ``is_active``
     Whether the instrument is active from this state onward.
@@ -50,7 +50,7 @@ class _InstrumentFrameNormalizer:
     bootstrap ``SecurityManager`` before the chronological backtest starts.
     """
 
-    symbol_column: str = "symbol"
+    symbol_column: str = "instrument_id"
     date_column: str = "date"
     list_date_column: str = "list_date"
     delist_date_column: str = "delist_date"
@@ -59,7 +59,7 @@ class _InstrumentFrameNormalizer:
     def expand(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Return an expanded copy with canonical lifecycle columns.
 
-        The returned frame always contains ``date``, ``symbol`` and
+        The returned frame always contains ``date``, ``instrument_id`` and
         ``is_active`` (or the configured output column names). Input rows are
         never mutated.
         """
@@ -67,7 +67,7 @@ class _InstrumentFrameNormalizer:
             raise TypeError("frame must be a pandas DataFrame")
         if self.symbol_column not in frame.columns:
             raise ValueError(
-                f"missing required instrument symbol column {self.symbol_column!r}"
+                f"missing required instrument_id column {self.symbol_column!r}"
             )
 
         expanded = frame.copy()
@@ -110,9 +110,9 @@ class _InstrumentFrameNormalizer:
         return result
 
     def _expand_symbol(self, group: pd.DataFrame) -> pd.DataFrame:
-        symbol = str(group[self.symbol_column].iloc[0])
-        list_date = self._unique_date(group, self.list_date_column, symbol)
-        delist_date = self._unique_date(group, self.delist_date_column, symbol)
+        instrument_id = str(group[self.symbol_column].iloc[0])
+        list_date = self._unique_date(group, self.list_date_column, instrument_id)
+        delist_date = self._unique_date(group, self.delist_date_column, instrument_id)
 
         if (
             list_date is not None
@@ -120,7 +120,7 @@ class _InstrumentFrameNormalizer:
             and list_date > delist_date
         ):
             raise ValueError(
-                f"instrument {symbol!r} has list_date after delist_date"
+                f"instrument {instrument_id!r} has list_date after delist_date"
             )
 
         dated = group[group[self.date_column].notna()].sort_values(
@@ -131,7 +131,7 @@ class _InstrumentFrameNormalizer:
 
         if dated.empty and len(undated) > 1:
             raise ValueError(
-                f"instrument {symbol!r} has multiple undated states; "
+                f"instrument {instrument_id!r} has multiple undated states; "
                 "provide a date for changing instrument attributes"
             )
 
@@ -142,7 +142,7 @@ class _InstrumentFrameNormalizer:
             self.date_column,
             list_date,
         ):
-            source = self._state_for_listing(dated, undated, list_date, symbol)
+            source = self._state_for_listing(dated, undated, list_date, instrument_id)
             active = source.copy()
             active[self.date_column] = list_date
             active[self.active_column] = True
@@ -153,7 +153,7 @@ class _InstrumentFrameNormalizer:
                 dated,
                 undated,
                 delist_date,
-                symbol,
+                instrument_id,
             )
             inactive = source.copy()
             inactive[self.date_column] = delist_date
@@ -174,7 +174,7 @@ class _InstrumentFrameNormalizer:
         dated: pd.DataFrame,
         undated: pd.DataFrame,
         list_date: pd.Timestamp,
-        symbol: str,
+        instrument_id: str,
     ) -> pd.Series:
         candidates = dated[dated[self.date_column] <= list_date]
         if not candidates.empty:
@@ -182,7 +182,7 @@ class _InstrumentFrameNormalizer:
         if not undated.empty:
             return undated.iloc[-1]
         raise ValueError(
-            f"instrument {symbol!r} has no state available at list_date "
+            f"instrument {instrument_id!r} has no state available at list_date "
             f"{list_date!s}"
         )
 
@@ -191,7 +191,7 @@ class _InstrumentFrameNormalizer:
         dated: pd.DataFrame,
         undated: pd.DataFrame,
         delist_date: pd.Timestamp,
-        symbol: str,
+        instrument_id: str,
     ) -> pd.Series:
         candidates = dated[dated[self.date_column] <= delist_date]
         if not candidates.empty:
@@ -199,16 +199,16 @@ class _InstrumentFrameNormalizer:
         if not undated.empty:
             return undated.iloc[-1]
         raise ValueError(
-            f"instrument {symbol!r} has no state available at delist_date "
+            f"instrument {instrument_id!r} has no state available at delist_date "
             f"{delist_date!s}"
         )
 
     def _validate_symbols(self, frame: pd.DataFrame) -> None:
         symbols = frame[self.symbol_column]
         if symbols.isna().any():
-            raise ValueError("instrument symbol cannot be missing")
+            raise ValueError("instrument_id cannot be missing")
         if symbols.astype(str).str.strip().eq("").any():
-            raise ValueError("instrument symbol cannot be empty")
+            raise ValueError("instrument_id cannot be empty")
 
     @staticmethod
     def _normalize_date_column(frame: pd.DataFrame, column: str) -> None:
@@ -237,14 +237,14 @@ class _InstrumentFrameNormalizer:
     def _unique_date(
         frame: pd.DataFrame,
         column: str,
-        symbol: str,
+        instrument_id: str,
     ) -> pd.Timestamp | None:
         if column not in frame.columns:
             return None
         values = pd.unique(frame[column].dropna())
         if len(values) > 1:
             raise ValueError(
-                f"instrument {symbol!r} has conflicting {column} values"
+                f"instrument {instrument_id!r} has conflicting {column} values"
             )
         if len(values) == 0:
             return None
@@ -260,7 +260,7 @@ class InstrumentStateReader(DataReader):
     def read(self, source: Any, *, exchange=None):
         frame = self.frame(source)
         expanded = _InstrumentFrameNormalizer(
-            symbol_column=self.schema.get("symbol", "symbol"),
+            symbol_column=self.schema.get("instrument_id", "instrument_id"),
             date_column=self.schema.get("date", "date"),
             list_date_column=self.schema.get("list_date", "list_date"),
             delist_date_column=self.schema.get("delist_date", "delist_date"),
@@ -269,7 +269,7 @@ class InstrumentStateReader(DataReader):
 
         mapping = self.schema_resolver.resolve(
             expanded,
-            required=("symbol", "date", "is_active"),
+            required=("instrument_id", "date", "is_active"),
             optional=(
                 "list_date",
                 "delist_date",
@@ -291,7 +291,7 @@ class InstrumentStateReader(DataReader):
     def _make_state(self, exchange, frame, row, mapping, get):
         known_columns = set(mapping.values())
         common = dict(
-            symbol=str(get(row, mapping["symbol"])),
+            instrument_id=str(get(row, mapping["instrument_id"])),
             time=datetime_or_none(get(row, mapping["date"])),
             is_active=bool(get(row, mapping["is_active"])),
             exchange=exchange,
@@ -333,25 +333,25 @@ class EquityStateReader(InstrumentStateReader):
 
 class FutureStateReader(InstrumentStateReader):
     state_type = FutureStateData
-    extra_fields = ("expiry", "root_symbol")
+    extra_fields = ("expiry", "root_instrument_id")
 
     def _create_state(self, common, row, get, mapping):
         return FutureStateData(
             **common,
             expiry=datetime_or_none(get(row, mapping.get("expiry"))),
-            root_symbol=string_or_none(get(row, mapping.get("root_symbol"))),
+            root_instrument_id=string_or_none(get(row, mapping.get("root_instrument_id"))),
         )
 
 
 class OptionStateReader(InstrumentStateReader):
     state_type = OptionStateData
-    extra_fields = ("underlying_symbol", "expiry", "strike", "right", "style")
+    extra_fields = ("underlying_instrument_id", "expiry", "strike", "right", "style")
 
     def _create_state(self, common, row, get, mapping):
         return OptionStateData(
             **common,
-            underlying_symbol=string_or_none(
-                get(row, mapping.get("underlying_symbol"))
+            underlying_instrument_id=string_or_none(
+                get(row, mapping.get("underlying_instrument_id"))
             ),
             expiry=datetime_or_none(get(row, mapping.get("expiry"))),
             strike=float_or_none(get(row, mapping.get("strike"))),

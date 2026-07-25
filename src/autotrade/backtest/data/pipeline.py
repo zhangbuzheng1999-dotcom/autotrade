@@ -32,13 +32,13 @@ class _DataStream:
         for item in self.data:
             if item.time is None:
                 raise ValueError(
-                    f"bootstrap record {item.symbol!r} cannot enter DataStream"
+                    f"bootstrap record {item.instrument_id!r} cannot enter DataStream"
                 )
-            key = (item.time, item.symbol)
+            key = (item.time, item.instrument_id)
             if previous_key is not None and key < previous_key:
                 raise ValueError(
                     f"data stream '{self.data_name}' is not ordered by "
-                    f"(time, symbol): {key!r} follows {previous_key!r}"
+                    f"(time, instrument_id): {key!r} follows {previous_key!r}"
                 )
             previous_key = key
             yield _NamedData(self.data_name, item)
@@ -151,12 +151,12 @@ class _TimeSliceRouter:
                 price = float(record.value)
                 if not math.isfinite(price):
                     raise ValueError(
-                        f"valuation price must be finite for {record.symbol!r}, "
+                        f"valuation price must be finite for {record.instrument_id!r}, "
                         f"got {record.value!r}"
                     )
                 valuation.append(
                     ValuationUpdate(
-                        symbol=record.symbol,
+                        instrument_id=record.instrument_id,
                         time=record.time,
                         price=price,
                         source=record,

@@ -7,9 +7,9 @@ import pandas as pd
 from autotrade.coreutils.constant import Direction, Exchange, OrderType
 from autotrade.coreutils.object import OrderRequest
 
-from autotrade.backtest.backtest_gateway import Fill
+from autotrade.backtest.gateway import Fill
 from autotrade.backtest.backtest_engine import BacktestEngine
-from autotrade.backtest.performance_analyzer import PerformanceAnalyzer
+from autotrade.backtest.reporting import PerformanceAnalyzer
 from autotrade.engine.security_manager import SecurityManager
 from autotrade.coreutils.object import (
     Slice,
@@ -23,14 +23,14 @@ from autotrade.backtest.data.pipeline import (
     _TimeSliceRouter,
 )
 from autotrade.backtest.data.reader import TradeBarReader
-from autotrade.backtest.backtest_event_engine import BacktestEventEngine
+from autotrade.backtest.event_engine import BacktestEventEngine
 
 
 class NumericSafetyTests(unittest.TestCase):
     def test_trade_bar_rejects_non_finite_price(self):
         with self.assertRaisesRegex(ValueError, "open must be finite"):
             TradeBar(
-                symbol="A",
+                instrument_id="A",
                 time=datetime(2024, 1, 1),
                 open=math.nan,
                 high=1,
@@ -40,7 +40,7 @@ class NumericSafetyTests(unittest.TestCase):
 
     def test_reader_rejects_infinite_price(self):
         frame = pd.DataFrame(
-            [{"symbol": "A", "time": datetime(2024, 1, 1),
+            [{"instrument_id": "A", "time": datetime(2024, 1, 1),
               "open": 1, "high": math.inf, "low": 1, "close": 1}]
         )
         with self.assertRaisesRegex(ValueError, "high must be finite"):
@@ -49,14 +49,14 @@ class NumericSafetyTests(unittest.TestCase):
     def test_gateway_rejects_non_finite_fill(self):
         engine = BacktestEngine(logger=_QuietLogger())
         request = OrderRequest(
-            symbol="A",
+            instrument_id="A",
             exchange=Exchange.SSE,
             direction=Direction.LONG,
             type=OrderType.MARKET,
             volume=1,
         )
         order = engine.gateway.send_order(request)
-        fill = Fill(order.orderid, order.symbol, math.nan, 1, datetime(2024, 1, 1))
+        fill = Fill(order.orderid, order.instrument_id, math.nan, 1, datetime(2024, 1, 1))
 
         with self.assertRaisesRegex(ValueError, "fill price must be finite"):
             engine.gateway._apply_fill(order, fill)
@@ -65,7 +65,7 @@ class NumericSafetyTests(unittest.TestCase):
 
     def test_mark_to_market_rejects_non_finite_value(self):
         data = TradeBar(
-            symbol="A",
+            instrument_id="A",
             time=datetime(2024, 1, 1),
             open=1,
             high=1,
@@ -110,7 +110,7 @@ class SliceDataTests(unittest.TestCase):
 
     def test_slice_reports_named_data(self):
         bar = TradeBar(
-            symbol="A",
+            instrument_id="A",
             time=datetime(2024, 1, 1),
             open=1,
             high=1,
@@ -132,7 +132,7 @@ class SliceDataTests(unittest.TestCase):
         self.assertFalse(engine.account_daily)
 
         bar = TradeBar(
-            symbol="A",
+            instrument_id="A",
             time=when,
             open=1,
             high=1,
@@ -144,7 +144,7 @@ class SliceDataTests(unittest.TestCase):
             slice=Slice(time=when),
             valuation_updates=(
                 ValuationUpdate(
-                    symbol="A",
+                    instrument_id="A",
                     time=when,
                     price=1,
                     source=bar,

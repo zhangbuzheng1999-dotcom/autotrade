@@ -19,19 +19,14 @@ ACTIVE_STATUSES = set([OrderStatus.SUBMITTING, OrderStatus.NOTTRADED,
                        OrderStatus.UNKNOWN, OrderStatus.MODIFIED])
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BaseData:
-    """
-    Any data object needs a gateway_name as source
-    and should inherit base data.
-    """
-
-    gateway_name: str
+    """Common extension point for runtime data objects."""
 
     extra: dict | None = field(default=None, init=False)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class TickData(BaseData):
     """
     Tick data contains information about:
@@ -40,9 +35,10 @@ class TickData(BaseData):
         * intraday market statistics.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
+    exchange: Exchange | None = None
     datetime: Datetime
+    gateway_name: str | None = None
 
     name: str = ""
     volume: float = 0
@@ -85,20 +81,16 @@ class TickData(BaseData):
 
     localtime: Datetime | None = None
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-
-
-@dataclass
+@dataclass(kw_only=True)
 class BarData(BaseData):
     """
     Candlestick bar data of a certain trading period.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
+    exchange: Exchange | None = None
     datetime: Datetime
+    gateway_name: str | None = None
 
     interval: Interval | None = None
     volume: float = 0
@@ -109,21 +101,17 @@ class BarData(BaseData):
     low_price: float = 0
     close_price: float = 0
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-
-
-@dataclass
+@dataclass(kw_only=True)
 class OrderData(BaseData):
     """
     Order data contains information for tracking lastest status
     of a specific order.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     orderid: str
+    exchange: Exchange | None = None
+    gateway_name: str | None = None
 
     type: OrderType = OrderType.LIMIT
     direction: Direction | None = None
@@ -138,11 +126,6 @@ class OrderData(BaseData):
     reference: str = ""
     trigger_price: float = 0
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-        self.vt_orderid: str = f"{self.gateway_name}.{self.orderid}"
-
     def is_active(self) -> bool:
         """
         Check if the order is active.
@@ -154,14 +137,14 @@ class OrderData(BaseData):
         Create cancel request object from order.
         """
         req: CancelRequest = CancelRequest(
-            orderid=self.orderid, symbol=self.symbol, exchange=self.exchange
+            orderid=self.orderid, instrument_id=self.instrument_id, exchange=self.exchange
         )
         return req
 
     def to_dict(self) -> dict:
         """安全序列化为 dict"""
         return {
-            "symbol": self.symbol,
+            "instrument_id": self.instrument_id,
             "exchange": self.exchange.value if self.exchange else None,
             "orderid": self.orderid,
             "type": self.type.value if self.type else None,
@@ -176,22 +159,22 @@ class OrderData(BaseData):
             "broker_orderid": self.broker_orderid,
             "reference": self.reference,
             "trigger_price": self.trigger_price,
-            "vt_symbol": self.vt_symbol,
-            "vt_orderid": self.vt_orderid,
+            "gateway_name": self.gateway_name,
         }
 
 
-@dataclass
+@dataclass(kw_only=True)
 class TradeData(BaseData):
     """
     Trade data contains information of a fill of an order. One order
     can have several trade fills.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     orderid: str
     tradeid: str
+    exchange: Exchange | None = None
+    gateway_name: str | None = None
     direction: Direction | None = None
 
     offset: Offset = Offset.NONE
@@ -203,12 +186,6 @@ class TradeData(BaseData):
     status: OrderStatus | None = None
     reference: str = ""
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-        self.vt_orderid: str = f"{self.gateway_name}.{self.orderid}"
-        self.vt_tradeid: str = f"{self.gateway_name}.{self.tradeid}"
-
     def is_active(self) -> bool:
         """
         Check if the order is active.
@@ -218,7 +195,7 @@ class TradeData(BaseData):
     def to_dict(self) -> dict:
         """安全序列化为 dict"""
         return {
-            "symbol": self.symbol,
+            "instrument_id": self.instrument_id,
             "exchange": self.exchange.value if self.exchange else None,
             "orderid": self.orderid,
             "tradeid": self.tradeid,
@@ -231,23 +208,21 @@ class TradeData(BaseData):
             "avgFillPrice": self.avgFillPrice,
             "status": self.status.value if self.status else None,
             "reference": self.reference,
-            "vt_symbol": self.vt_symbol,
-            "vt_orderid": self.vt_orderid,
-            "vt_tradeid": self.vt_tradeid,
+            "gateway_name": self.gateway_name,
         }
 
 
-@dataclass
+@dataclass(kw_only=True)
 class PositionData(BaseData):
     """
     Position data is used for tracking each individual position holding.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     direction: Direction
-
-    contract_symbol: str | None = None  # 期货具体合约
+    exchange: Exchange | None = None
+    gateway_name: str | None = None
+    contract_instrument_id: str | None = None
     volume: float = 0
     frozen: float = 0
     price: float = 0
@@ -255,15 +230,10 @@ class PositionData(BaseData):
     yd_volume: float = 0
     margin: float = 0
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-        self.vt_positionid: str = f"{self.gateway_name}.{self.vt_symbol}.{self.direction.value}"
-
     def to_dict(self) -> dict:
         """安全序列化为 dict"""
         return {
-            "symbol": self.symbol,
+            "instrument_id": self.instrument_id,
             "exchange": self.exchange.value if self.exchange else None,
             "direction": self.direction.value if self.direction else None,
             "volume": self.volume,
@@ -272,12 +242,12 @@ class PositionData(BaseData):
             "pnl": self.pnl,
             "yd_volume": self.yd_volume,
             "margin": self.margin,
-            "vt_symbol": self.vt_symbol,
-            "vt_positionid": self.vt_positionid,
+            "gateway_name": self.gateway_name,
+            "contract_instrument_id": self.contract_instrument_id,
         }
 
 
-@dataclass
+@dataclass(kw_only=True)
 class AccountData(BaseData):
     """
     Account data contains information about balance, frozen and
@@ -285,6 +255,7 @@ class AccountData(BaseData):
     """
 
     accountid: str
+    gateway_name: str | None = None
     balance: float = 0
     frozen: float = 0.0
     cash: float = 0.0
@@ -293,11 +264,6 @@ class AccountData(BaseData):
     unrealized_pnl: float = 0.0
     equity: float = 0.0
     available: float = 0.0
-
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_accountid: str = f"{self.gateway_name}.{self.accountid}"
-
 
 @dataclass
 class LogData:
@@ -313,18 +279,19 @@ class LogData:
         self.time: Datetime = Datetime.now()
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ContractData(BaseData):
     """
     Contract data contains basic information about each contract traded.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     name: str
     product: Product
     size: float
     pricetick: float
+    exchange: Exchange | None = None
+    gateway_name: str | None = None
 
     min_volume: float = 1  # minimum order volume
     max_volume: float | None = None  # maximum order volume
@@ -333,28 +300,24 @@ class ContractData(BaseData):
     history_data: bool = False  # whether gateway provides bar history data
 
     option_strike: float | None = None
-    option_underlying: str | None = None  # vt_symbol of underlying contract
+    underlying_instrument_id: str | None = None
     option_type: OptionType | None = None
     option_listed: Datetime | None = None
     option_expiry: Datetime | None = None
     option_portfolio: str | None = None
     option_index: str | None = None  # for identifying options with same strike price
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-
-
-@dataclass
+@dataclass(kw_only=True)
 class QuoteData(BaseData):
     """
     Quote data contains information for tracking lastest status
     of a specific quote.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     quoteid: str
+    exchange: Exchange | None = None
+    gateway_name: str | None = None
 
     bid_price: float = 0.0
     bid_volume: int = 0
@@ -365,11 +328,6 @@ class QuoteData(BaseData):
     status: OrderStatus = OrderStatus.SUBMITTING
     datetime: Datetime | None = None
     reference: str = ""
-
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-        self.vt_quoteid: str = f"{self.gateway_name}.{self.quoteid}"
 
     def is_active(self) -> bool:
         """
@@ -382,52 +340,46 @@ class QuoteData(BaseData):
         Create cancel request object from quote.
         """
         req: CancelRequest = CancelRequest(
-            orderid=self.quoteid, symbol=self.symbol, exchange=self.exchange
+            orderid=self.quoteid, instrument_id=self.instrument_id, exchange=self.exchange
         )
         return req
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SubscribeRequest:
     """
     Request sending to specific gateway for subscribing tick data update.
     """
 
-    symbol: str
-    exchange: Exchange
-
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
+    instrument_id: str
+    exchange: Exchange | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class OrderRequest:
     """
     Request sending to specific gateway for creating a new order.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     direction: Direction
     type: OrderType
     volume: float
+    exchange: Exchange | None = None
     price: float = 0
     trigger_price: float = 0  # STOP类型的触发价格
     adjust_limit: float = 0
     offset: Offset = Offset.NONE
     reference: str = ""
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-
-    def create_order_data(self, orderid: str, gateway_name: str) -> OrderData:
+    def create_order_data(
+        self, orderid: str, gateway_name: str | None = None
+    ) -> OrderData:
         """
         Create order data from request.
         """
         order: OrderData = OrderData(
-            symbol=self.symbol,
+            instrument_id=self.instrument_id,
             exchange=self.exchange,
             orderid=orderid,
             type=self.type,
@@ -442,82 +394,67 @@ class OrderRequest:
         return order
 
 
-@dataclass
+@dataclass(kw_only=True)
 class CancelRequest:
     """
     Request sending to specific gateway for canceling an existing order.
     """
 
     orderid: str
-    symbol: str
-    exchange: Exchange
-
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
+    instrument_id: str
+    exchange: Exchange | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ModifyRequest:
     """
     Request sending to specific gateway for canceling an existing order.
     """
 
     orderid: str
-    symbol: str
+    instrument_id: str
     qty: float
     price: float
-    exchange: Exchange
+    exchange: Exchange | None = None
     trigger_price: float = 0  # STOP类型的触发价格
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
 
-
-@dataclass
+@dataclass(kw_only=True)
 class HistoryRequest:
     """
     Request sending to specific gateway for querying history data.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     start: Datetime
+    exchange: Exchange | None = None
     end: Datetime | None = None
     interval: Interval | None = None
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-
-
-@dataclass
+@dataclass(kw_only=True)
 class QuoteRequest:
     """
     Request sending to specific gateway for creating a new quote.
     """
 
-    symbol: str
-    exchange: Exchange
+    instrument_id: str
     bid_price: float
     bid_volume: int
     ask_price: float
     ask_volume: int
+    exchange: Exchange | None = None
     bid_offset: Offset = Offset.NONE
     ask_offset: Offset = Offset.NONE
     reference: str = ""
 
-    def __post_init__(self) -> None:
-        """"""
-        self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"
-
-    def create_quote_data(self, quoteid: str, gateway_name: str) -> QuoteData:
+    def create_quote_data(
+        self, quoteid: str, gateway_name: str | None = None
+    ) -> QuoteData:
         """
         Create quote data from request.
         """
         quote: QuoteData = QuoteData(
-            symbol=self.symbol,
+            instrument_id=self.instrument_id,
             exchange=self.exchange,
             quoteid=quoteid,
             bid_price=self.bid_price,
@@ -590,7 +527,7 @@ class RequestStatus:
 class MarketData:
     """Canonical market record consumed by the TimeSlice backtest runtime."""
 
-    symbol: str
+    instrument_id: str
     time: Datetime
     value: float | None = None
     exchange: Exchange | None = None
@@ -601,7 +538,7 @@ class MarketData:
 class InstrumentStateData:
     """Complete instrument-definition snapshot effective at ``time``."""
 
-    symbol: str
+    instrument_id: str
     time: Datetime | None
     is_active: bool
     exchange: Exchange | None = None
@@ -615,8 +552,8 @@ class InstrumentStateData:
     attributes: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.symbol.strip():
-            raise ValueError("instrument symbol cannot be empty")
+        if not self.instrument_id.strip():
+            raise ValueError("instrument_id cannot be empty")
         if self.multiplier <= 0 or not math.isfinite(float(self.multiplier)):
             raise ValueError("instrument multiplier must be finite and positive")
         for name in (
@@ -638,12 +575,12 @@ class EquityStateData(InstrumentStateData):
 @dataclass(slots=True)
 class FutureStateData(InstrumentStateData):
     expiry: Datetime | None = None
-    root_symbol: str | None = None
+    root_instrument_id: str | None = None
 
 
 @dataclass(slots=True)
 class OptionStateData(InstrumentStateData):
-    underlying_symbol: str | None = None
+    underlying_instrument_id: str | None = None
     expiry: Datetime | None = None
     strike: float | None = None
     right: str | None = None
@@ -659,7 +596,7 @@ class OptionStateData(InstrumentStateData):
 
 @dataclass(frozen=True, slots=True)
 class ValuationUpdate:
-    symbol: str
+    instrument_id: str
     time: Datetime
     price: float
     source: MarketData
@@ -776,7 +713,7 @@ class Security(MarketData):
         return self.value
 
     def update_market(self, data: MarketData) -> None:
-        if data.symbol != self.symbol:
+        if data.instrument_id != self.instrument_id:
             raise ValueError("market data does not belong to security")
         self.source = data
         self.time = data.time
@@ -809,7 +746,7 @@ class Security(MarketData):
                 self.value = data.price
 
     def apply_state(self, state: InstrumentStateData) -> None:
-        if state.symbol != self.symbol:
+        if state.instrument_id != self.instrument_id:
             raise ValueError("instrument state does not belong to security")
         self.is_active = state.is_active
         self.is_tradable = state.is_active
@@ -841,19 +778,19 @@ class EquitySecurity(Security):
 @dataclass(slots=True)
 class FutureContract(Security):
     expiry: Datetime | None = None
-    root_symbol: str | None = None
+    root_instrument_id: str | None = None
 
     def apply_state(self, state: InstrumentStateData) -> None:
         if not isinstance(state, FutureStateData):
             raise TypeError("FutureContract requires FutureStateData")
         super(FutureContract, self).apply_state(state)
         self.expiry = state.expiry
-        self.root_symbol = state.root_symbol
+        self.root_instrument_id = state.root_instrument_id
 
 
 @dataclass(slots=True)
 class OptionContract(Security):
-    underlying_symbol: str | None = None
+    underlying_instrument_id: str | None = None
     expiry: Datetime | None = None
     strike: float | None = None
     right: str | None = None
@@ -868,7 +805,7 @@ class OptionContract(Security):
         if not isinstance(state, OptionStateData):
             raise TypeError("OptionContract requires OptionStateData")
         super(OptionContract, self).apply_state(state)
-        self.underlying_symbol = state.underlying_symbol
+        self.underlying_instrument_id = state.underlying_instrument_id
         self.expiry = state.expiry
         self.strike = state.strike
         self.right = state.right
@@ -883,25 +820,25 @@ class CustomData(MarketData):
 
 @dataclass(slots=True)
 class OptionChain(MarketData):
-    canonical_symbol: str = ""
-    underlying_symbol: str = ""
+    canonical_instrument_id: str = ""
+    underlying_instrument_id: str = ""
     underlying_price: float | None = None
     contracts: dict[str, OptionContract] = field(default_factory=dict)
     filtered_contracts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.canonical_symbol = self.canonical_symbol or self.symbol
+        self.canonical_instrument_id = self.canonical_instrument_id or self.instrument_id
 
 
 @dataclass(slots=True)
 class FuturesChain(MarketData):
-    canonical_symbol: str = ""
-    root_symbol: str = ""
+    canonical_instrument_id: str = ""
+    root_instrument_id: str = ""
     contracts: dict[str, FutureContract] = field(default_factory=dict)
     mapped_contract: str | None = None
 
     def __post_init__(self) -> None:
-        self.canonical_symbol = self.canonical_symbol or self.symbol
+        self.canonical_instrument_id = self.canonical_instrument_id or self.instrument_id
 
 
 @dataclass(slots=True)
@@ -926,13 +863,13 @@ class Slice:
     def bar_list(self) -> list[TradeBar]:
         return sorted(
             self._primary_bars.values(),
-            key=lambda bar: (bar.symbol, _interval_sort_value(bar.interval), bar.time),
+            key=lambda bar: (bar.instrument_id, _interval_sort_value(bar.interval), bar.time),
         )
 
-    def get_bar(self, symbol: str, data_name: str | None = None) -> TradeBar | None:
+    def get_bar(self, instrument_id: str, data_name: str | None = None) -> TradeBar | None:
         if data_name is not None:
-            return self.bars.get(data_name, {}).get(symbol)
-        return self._primary_bars.get(symbol)
+            return self.bars.get(data_name, {}).get(instrument_id)
+        return self._primary_bars.get(instrument_id)
 
     def contains_data(self, data_name: str) -> bool:
         return any(
@@ -949,20 +886,20 @@ class Slice:
 
     def _index(self, data_name: str, data: Any) -> None:
         if isinstance(data, TradeBar):
-            self.bars.setdefault(data_name, {})[data.symbol] = data
-            current = self._primary_bars.get(data.symbol)
+            self.bars.setdefault(data_name, {})[data.instrument_id] = data
+            current = self._primary_bars.get(data.instrument_id)
             if current is None or _interval_sort_value(current.interval) > _interval_sort_value(data.interval):
-                self._primary_bars[data.symbol] = data
+                self._primary_bars[data.instrument_id] = data
         elif isinstance(data, QuoteBar):
-            self.quote_bars.setdefault(data_name, {})[data.symbol] = data
+            self.quote_bars.setdefault(data_name, {})[data.instrument_id] = data
         elif isinstance(data, Tick):
-            self.ticks.setdefault(data_name, {}).setdefault(data.symbol, []).append(data)
+            self.ticks.setdefault(data_name, {}).setdefault(data.instrument_id, []).append(data)
         elif isinstance(data, CustomData):
-            self.custom_data.setdefault(data_name, {}).setdefault(data.symbol, []).append(data)
+            self.custom_data.setdefault(data_name, {}).setdefault(data.instrument_id, []).append(data)
         elif isinstance(data, OptionChain):
-            self.option_chains.setdefault(data_name, {})[data.canonical_symbol] = data
+            self.option_chains.setdefault(data_name, {})[data.canonical_instrument_id] = data
         elif isinstance(data, FuturesChain):
-            self.futures_chains.setdefault(data_name, {})[data.canonical_symbol] = data
+            self.futures_chains.setdefault(data_name, {})[data.canonical_instrument_id] = data
 
     @classmethod
     def from_named_data(

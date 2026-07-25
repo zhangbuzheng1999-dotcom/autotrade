@@ -3,7 +3,7 @@
 from websockets.legacy.exceptions import InvalidStatusCode
 
 from autotrade.engine import EventEngine, Event, EVENT_COMMAND
-from autotrade.engine.oms_engine import OmsBase
+from autotrade.engine.oms import OmsBase
 from autotrade.conn import EngineMesAdapter
 
 # 你的真实数据类/枚举（按你的工程路径导入）
@@ -388,7 +388,7 @@ cli.query_logs(engine="test", date="2025-08-08", level=["INFO","ERROR","WARNING"
 oms.get_all_orders()
 
 from autotrade.engine import EventEngine, Event, EVENT_ORDER, EVENT_POSITION
-from autotrade.engine.oms_engine import OmsBase
+from autotrade.engine.oms import OmsBase
 
 # 你的真实数据类/枚举（按你的工程路径导入）
 from autotrade.coreutils import OrderData, PositionData

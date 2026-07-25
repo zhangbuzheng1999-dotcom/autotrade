@@ -19,11 +19,11 @@ from autotrade.backtest.data import (
 class DataPipelineTests(unittest.TestCase):
     def test_bootstrap_then_routed_market_slice_uses_same_object_reference(self):
         equities = pd.DataFrame(
-            [{"symbol": "AAA", "multiplier": 2, "margin_rate": 0.1}]
+            [{"instrument_id": "AAA", "multiplier": 2, "margin_rate": 0.1}]
         )
         bars = pd.DataFrame(
             [{
-                "symbol": "AAA",
+                "instrument_id": "AAA",
                 "time": "2024-01-02 09:31:00",
                 "open": 10,
                 "high": 12,
@@ -70,7 +70,7 @@ class DataPipelineTests(unittest.TestCase):
         futures = pd.DataFrame([
             {
                 "date": "2024-01-01",
-                "symbol": "IF2401",
+                "instrument_id": "IF2401",
                 "list_date": "2024-01-01",
                 "delist_date": "2024-01-20",
                 "multiplier": 300,
@@ -78,7 +78,7 @@ class DataPipelineTests(unittest.TestCase):
             },
             {
                 "date": "2024-01-10",
-                "symbol": "IF2401",
+                "instrument_id": "IF2401",
                 "list_date": "2024-01-01",
                 "delist_date": "2024-01-20",
                 "multiplier": 200,

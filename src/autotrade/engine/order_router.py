@@ -57,8 +57,8 @@ class OrderRouter:
         )
         if not self.active:
             return
-        if request.symbol in self._muted_symbols and not internal:
-            self._log(f"[OrderRouter] blocked: {request.symbol} ref={reference}")
+        if request.instrument_id in self._muted_symbols and not internal:
+            self._log(f"[OrderRouter] blocked: {request.instrument_id} ref={reference}")
             return
         self._forward(message)
 
@@ -69,8 +69,8 @@ class OrderRouter:
     def _modify(self, message: Message) -> None:
         if not self.active:
             return
-        if message.data.symbol in self._muted_symbols:
-            self._log(f"[OrderRouter] modify blocked: {message.data.symbol}")
+        if message.data.instrument_id in self._muted_symbols:
+            self._log(f"[OrderRouter] modify blocked: {message.data.instrument_id}")
             return
         self._forward(message)
 

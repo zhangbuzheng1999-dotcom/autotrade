@@ -22,7 +22,7 @@ class MACDStrategy(StrategyBase):
     def __init__(
             self,
             event_engine,
-            symbol: str,
+            instrument_id: str,
             exchange: Exchange = Exchange.HKFE,
             work_interval: Interval = Interval.K_1M,
             volume: int = 1,
@@ -33,7 +33,7 @@ class MACDStrategy(StrategyBase):
         super().__init__(event_engine)
 
         # 基本参数
-        self.symbol = symbol
+        self.instrument_id = instrument_id
         self.exchange = exchange
         self.work_interval = work_interval
         self.volume = int(volume)
@@ -50,7 +50,7 @@ class MACDStrategy(StrategyBase):
 
         # 简化的持仓（只跟踪多头净仓）
         self.position = PositionData(
-            symbol=self.symbol,
+            instrument_id=self.instrument_id,
             exchange=self.exchange,
             volume=0,
             price=0.0,
@@ -63,7 +63,7 @@ class MACDStrategy(StrategyBase):
     def on_trade(self, trade: TradeData):
         self.write_log(LogData(msg=f"[MACD] {self.data_time} 收到TradeData:{trade}"))
 
-        if trade.symbol != self.symbol:
+        if trade.instrument_id != self.instrument_id:
             return
 
         if trade.direction == Direction.LONG:
@@ -75,7 +75,7 @@ class MACDStrategy(StrategyBase):
     def on_bar(self, bar: BarData):
         self.data_time = bar.datetime
         # 仅在指定合约与周期上工作
-        if bar.symbol != self.symbol or bar.interval != self.work_interval:
+        if bar.instrument_id != self.instrument_id or bar.interval != self.work_interval:
             return
 
         close = float(bar.close_price)
@@ -132,7 +132,7 @@ class MACDStrategy(StrategyBase):
 
         if self._pending_signal == "buy" and self.position.volume == 0:
             targets["entry"] = TargetOrder(
-                symbol=self.symbol,
+                instrument_id=self.instrument_id,
                 reference=f"{self.data_time}entry",
                 direction=Direction.LONG,
                 price=px,
@@ -144,7 +144,7 @@ class MACDStrategy(StrategyBase):
         elif self._pending_signal == "sell" and self.position.volume > 0:
             # 平掉全部多头
             targets["close"] = TargetOrder(
-                symbol=self.symbol,
+                instrument_id=self.instrument_id,
                 reference=f"{self.data_time}close",
                 direction=Direction.SHORT,
                 price=px,
@@ -161,7 +161,7 @@ class MACDStrategy(StrategyBase):
         desired_entry = self._compute_desired_entry()
         for _, tgt in desired_entry.items():
             req = OrderRequest(
-                symbol=self.symbol,
+                instrument_id=self.instrument_id,
                 exchange=self.exchange,
                 direction=tgt.direction,
                 type=tgt.type,

@@ -1,0 +1,27 @@
+# Secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Python caches and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+/AGENTS.md
+
+# Runtime output
+*.log
+*.log.*
+repository_error.log
+example/backtest_res/
