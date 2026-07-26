@@ -12,6 +12,7 @@ from typing import Iterable, Iterator
 from autotrade.coreutils.object import (
     MarketData,
     InstrumentStateData,
+    OptionAnalyticsData,
     ValuationUpdate,
 )
 
@@ -125,6 +126,22 @@ class _TimeSliceRouter:
 
         for named in records:
             record = named.record
+            if isinstance(record, OptionAnalyticsData):
+                if named.data_name not in self.config.strategy_data_names:
+                    raise ValueError(
+                        f"option analytics source {named.data_name!r} "
+                        "must route to strategy"
+                    )
+                if named.data_name in self.config.security_data_names:
+                    raise ValueError(
+                        f"option analytics source {named.data_name!r} "
+                        "cannot route to security"
+                    )
+                if named.data_name in self.config.valuation_data_names:
+                    raise ValueError(
+                        f"option analytics source {named.data_name!r} "
+                        "cannot be a valuation source"
+                    )
             if isinstance(record, InstrumentStateData):
                 if named.data_name not in self.config.security_data_names:
                     raise ValueError(

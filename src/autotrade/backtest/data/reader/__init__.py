@@ -8,6 +8,7 @@ from .instrument import (
     OptionStateReader,
 )
 from .market import CustomDataReader, TickReader, TradeBarReader
+from .option import OptionAnalyticsReader
 
 __all__ = [
     "CustomDataReader",
@@ -15,6 +16,7 @@ __all__ = [
     "EquityStateReader",
     "FutureStateReader",
     "InstrumentStateReader",
+    "OptionAnalyticsReader",
     "OptionStateReader",
     "TickReader",
     "TradeBarReader",

@@ -795,11 +795,6 @@ class OptionContract(Security):
     strike: float | None = None
     right: str | None = None
     style: str | None = None
-    iv: float | None = None
-    delta: float | None = None
-    gamma: float | None = None
-    vega: float | None = None
-    theta: float | None = None
 
     def apply_state(self, state: InstrumentStateData) -> None:
         if not isinstance(state, OptionStateData):
@@ -819,15 +814,56 @@ class CustomData(MarketData):
 
 
 @dataclass(slots=True)
-class OptionChain(MarketData):
-    canonical_instrument_id: str = ""
-    underlying_instrument_id: str = ""
+class OptionAnalyticsData(MarketData):
+    """Versioned model output for one option contract at one time."""
+
+    underlying_instrument_id: str | None = None
     underlying_price: float | None = None
-    contracts: dict[str, OptionContract] = field(default_factory=dict)
-    filtered_contracts: list[str] = field(default_factory=list)
+    forward_price: float | None = None
+    risk_free_rate: float | None = None
+    time_to_expiry: float | None = None
+    market_iv: float | None = None
+    surface_iv: float | None = None
+    delta: float | None = None
+    gamma: float | None = None
+    vega: float | None = None
+    theta: float | None = None
+    rho: float | None = None
+    vanna: float | None = None
+    vomma: float | None = None
+    charm: float | None = None
+    model_id: str = ""
+    model_version: str = ""
 
     def __post_init__(self) -> None:
-        self.canonical_instrument_id = self.canonical_instrument_id or self.instrument_id
+        if not self.model_id.strip():
+            raise ValueError("model_id cannot be empty")
+        if not self.model_version.strip():
+            raise ValueError("model_version cannot be empty")
+        for field_name in (
+            "value",
+            "underlying_price",
+            "forward_price",
+            "risk_free_rate",
+            "time_to_expiry",
+            "market_iv",
+            "surface_iv",
+            "delta",
+            "gamma",
+            "vega",
+            "theta",
+            "rho",
+            "vanna",
+            "vomma",
+            "charm",
+        ):
+            number = getattr(self, field_name)
+            if number is not None:
+                _require_finite(number, field_name)
+        for field_name in ("time_to_expiry", "market_iv", "surface_iv"):
+            number = getattr(self, field_name)
+            if number is not None and number < 0:
+                raise ValueError(f"{field_name} must be non-negative")
 
 
 @dataclass(slots=True)
@@ -850,7 +886,9 @@ class Slice:
     quote_bars: dict[str, dict[str, QuoteBar]] = field(default_factory=dict)
     ticks: dict[str, dict[str, list[Tick]]] = field(default_factory=dict)
     custom_data: dict[str, dict[str, list[CustomData]]] = field(default_factory=dict)
-    option_chains: dict[str, dict[str, OptionChain]] = field(default_factory=dict)
+    option_analytics: dict[str, dict[str, OptionAnalyticsData]] = field(
+        default_factory=dict
+    )
     futures_chains: dict[str, dict[str, FuturesChain]] = field(default_factory=dict)
     all_data: list[Any] = field(default_factory=list)
     _primary_bars: dict[str, TradeBar] = field(default_factory=dict)
@@ -879,7 +917,7 @@ class Slice:
                 self.quote_bars,
                 self.ticks,
                 self.custom_data,
-                self.option_chains,
+                self.option_analytics,
                 self.futures_chains,
             )
         )
@@ -896,8 +934,8 @@ class Slice:
             self.ticks.setdefault(data_name, {}).setdefault(data.instrument_id, []).append(data)
         elif isinstance(data, CustomData):
             self.custom_data.setdefault(data_name, {}).setdefault(data.instrument_id, []).append(data)
-        elif isinstance(data, OptionChain):
-            self.option_chains.setdefault(data_name, {})[data.canonical_instrument_id] = data
+        elif isinstance(data, OptionAnalyticsData):
+            self.option_analytics.setdefault(data_name, {})[data.instrument_id] = data
         elif isinstance(data, FuturesChain):
             self.futures_chains.setdefault(data_name, {})[data.canonical_instrument_id] = data
 

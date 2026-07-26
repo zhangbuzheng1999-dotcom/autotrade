@@ -1,11 +1,10 @@
 # Autotrade 框架与使用指南
 
-> 架构版本：v0.3.0  
-> 版本日期：2026-07-25  
-> 适用范围：当前 `src/autotrade` 的统一实盘/回测运行时
+> 架构版本：v0.4.0
 >
-> 下一阶段：期权数据解耦目标版本为 v0.4.0，实施边界见
-> `OPTION_DATA_REFACTOR_PLAN.md`。该计划尚未改变当前 v0.3.0 运行时行为。
+> 版本日期：2026-07-26
+>
+> 适用范围：当前 `src/autotrade` 的统一实盘/回测运行时
 
 本文是当前框架的交接文档。它面向使用者、Gateway 开发者、策略开发者和后续维护代码的 AI。修改架构前，应先核对本文描述和测试；如果代码行为发生变化，应在同一个提交中更新本文。
 
@@ -76,7 +75,8 @@ TimeSlice(
 
 三个数据区域职责不同：
 
-- `slice`：策略可见的数据。可以同时包含 tick、1m、15m 或自定义数据，并用 `data_name` 区分。
+- `slice`：策略可见的数据。可以同时包含 tick、1m、15m、自定义数据或
+  `OptionAnalyticsData`，并用 `data_name` 区分。
 - `security_updates`：用于更新 `SecurityManager` 的标的定义和最新市场状态。
 - `valuation_updates`：专门触发账户盯市、保证金刷新和历史记录；为空时不进行估值和记录。
 
@@ -718,6 +718,63 @@ self.push_modify_request(modify_request)
 
 策略中的持仓变量若只是策略内部决策状态，可以保留；系统权威持仓应从 `EVENT_POSITION` 或 `engine.oms` 获取。
 
+### 8.1 期权策略与分析面板
+
+期权合约的基础信息和最新行情与其他资产使用相同路径：
+
+```text
+OptionStateData / TradeBar / QuoteBar / Tick
+-> TimeSlice.security_updates
+-> SecurityManager
+-> OptionContract
+```
+
+`OptionContract` 不保存 IV 或 Greeks。模型输出使用带版本信息的
+`OptionAnalyticsData`，只作为策略数据进入
+`Slice.option_analytics[data_name][instrument_id]`，不进入
+`security_updates` 或 `valuation_updates`。
+
+期权策略可继承 `OptionStrategy`：
+
+```python
+from autotrade.strategy import OptionPanelView, OptionStrategy
+
+
+class MyOptionStrategy(OptionStrategy):
+    def on_option_panel(
+        self,
+        panel: OptionPanelView,
+        slice_,
+    ) -> None:
+        frame = panel.to_frame()
+        # 按 underlying、expiry 或其他条件由策略自行分组和分析
+```
+
+初始化时指定分析数据源：
+
+```python
+strategy = MyOptionStrategy(
+    event_engine=event_engine,
+    security_manager=security_manager,
+    option_analytics_data_name="mo_black76_v1",
+)
+```
+
+`OptionStrategy.on_data()` 保留 `StrategyBase` 原有的 tick/bar 分发。只有当前
+Slice 包含配置的数据源时，它才调用同一模块中的
+`OptionPanelAssembler`。Assembler 以 Analytics 的 `instrument_id` 查询
+`SecurityManager` 并生成策略私有的 `OptionPanelView`，不会扫描全部
+Security，也不会按 underlying 或到期日分组。
+
+`OptionPanelView.contracts` 是
+`instrument_id -> OptionContractView` 映射，其中每个 View 同时提供：
+
+- `view.security`：合约基础信息和 SecurityManager 当前行情；
+- `view.analytics`：当前 Slice 的 IV、Greeks、模型及版本信息。
+
+Panel 可以包含多个 underlying。对象视图只适用于当前策略回调；需要横截面
+分析或保存快照时使用 `panel.to_frame()`。
+
 ## 9. 插件和扩展
 
 运行时可安装日志之外的独立插件：
@@ -787,6 +844,7 @@ pytest -q tests
 - `tests/test_routed_runtime.py`：组件结构、命令路由和 TimeSlice 顺序；
 - `tests/test_state_ownership.py`：Security/OMS/Gateway 状态权威；
 - `tests/test_data_pipeline.py`：历史数据同步与路由；
+- `tests/test_option_analytics.py`：期权分析数据、策略侧 Panel 组装和旧接口清理；
 - `tests/test_numeric_safety.py`：撮合、账本和绩效数值安全；
 - `tests/test_instrument_reader.py`：标的状态读取。
 

@@ -6,7 +6,7 @@
 >
 > 目标版本：v0.4.0
 >
-> 状态：设计确认，尚未开始实现
+> 状态：已完成
 
 本文记录 v0.3.0 之后的期权数据模型重构边界。实施过程中如设计发生变化，
 应同步更新本文、`FRAMEWORK_GUIDE.md` 和相关测试。
@@ -32,7 +32,7 @@ OptionStateData / TradeBar / QuoteBar / Tick
 `SecurityManager` 只负责回答“合约是什么”和“市场当前状态是什么”。模型相关
 的 IV、Greeks 和波动率曲面结果不属于它的权威状态。
 
-## 2. 计划中的对象调整
+## 2. 已完成的对象调整
 
 ### 2.1 精简 OptionContract
 
@@ -42,7 +42,7 @@ OptionStateData / TradeBar / QuoteBar / Tick
 - `expiry`、`strike`、`right`、`style`；
 - 从 `Security` 继承的交易属性、生命周期和最新行情。
 
-计划移除：
+已移除：
 
 - `iv`；
 - `delta`、`gamma`、`vega`、`theta`。
@@ -52,7 +52,7 @@ OptionStateData / TradeBar / QuoteBar / Tick
 
 ### 2.2 新增 OptionAnalyticsData
 
-新增逐时间、逐合约、带模型版本的策略数据类型，计划包括：
+已新增逐时间、逐合约、带模型版本的策略数据类型，包括：
 
 - 市场 IV、曲面 IV；
 - `delta`、`gamma`、`vega`、`theta`、`rho`；
@@ -63,10 +63,10 @@ OptionStateData / TradeBar / QuoteBar / Tick
 `OptionAnalyticsData` 只路由到 `strategy_data_names`，进入
 `Slice`，不进入 `security_updates` 或 `valuation_updates`。
 
-### 2.3 移除核心 OptionChain
+### 2.3 已移除核心 OptionChain
 
 当前 `coreutils.object.OptionChain` 没有独立 Reader 或运行时生产者，并且
-持有可变的 `OptionContract` 对象。计划从核心市场数据模型中移除：
+持有可变的 `OptionContract` 对象。v0.4.0 已从核心市场数据模型中移除：
 
 - `OptionChain`；
 - `Slice.option_chains`；
@@ -77,7 +77,7 @@ OptionStateData / TradeBar / QuoteBar / Tick
 
 ## 3. 策略侧组合
 
-新增可复用但不侵入通用运行时的 `OptionChainAssembler`：
+新增可复用但不侵入通用运行时的 `OptionPanelAssembler`：
 
 ```text
 SecurityManager
@@ -89,8 +89,8 @@ Slice
 └── OptionAnalyticsData
 
 以上两者
--> OptionChainAssembler
--> 策略私有 OptionChainView
+-> OptionPanelAssembler
+-> 策略私有 OptionPanelView
 ```
 
 Assembler 只读 `SecurityManager` 和当前 `Slice`，不修改共享状态。只有
@@ -117,16 +117,18 @@ OptionAnalyticsData。
 
 现有大宽表可以作为兼容输入或研究导出，但不再作为运行时唯一权威数据。
 
-## 5. 计划实施顺序
+## 5. 实施结果
 
-1. 新增 `OptionAnalyticsData`、Reader 和 `Slice.option_analytics` 索引；
-2. 增加 Reader、DataManager 路由和同时间数据对齐测试；
-3. 增加策略侧 `OptionChainAssembler` 与 `OptionChainView`；
-4. 使用短窗口 MO 数据验证合约、行情、分析指标三路导入；
-5. 将已有期权策略迁移到新接口；
-6. 标记旧 `OptionContract` Greeks 和核心 `OptionChain` 为 deprecated；
-7. 确认无调用方后删除旧字段和索引；
-8. 更新 `FRAMEWORK_GUIDE.md`，运行完整 `pytest -q tests`。
+1. 已新增 `OptionAnalyticsData`、Reader 和
+   `Slice.option_analytics` 索引；
+2. 已增加 Reader、DataManager 路由和同时间数据对齐测试；
+3. 已在 `strategy/option_strategy.py` 增加 `OptionStrategy`、
+   `OptionPanelAssembler`、`OptionPanelView` 和 DataFrame 接口；
+4. 已直接删除旧 `OptionContract` Greeks、核心 `OptionChain` 和
+   `Slice.option_chains`，不保留含糊的兼容状态；
+5. 已更新 `FRAMEWORK_GUIDE.md` 和包版本；
+6. 正式 `tests/` 已通过。MO 全量物理数据拆分和具体业务策略迁移属于后续
+   数据工程及策略工作，不属于核心运行时改造。
 
 ## 6. 必须守住的不变量
 
