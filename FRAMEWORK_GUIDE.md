@@ -8,6 +8,8 @@
 
 本文是当前框架的交接文档。它面向使用者、Gateway 开发者、策略开发者和后续维护代码的 AI。修改架构前，应先核对本文描述和测试；如果代码行为发生变化，应在同一个提交中更新本文。
 
+各版本的公开接口和架构变化记录在 `CHANGELOG.md`。
+
 ## 1. 设计目标
 
 Autotrade 当前遵循三个原则：
@@ -718,23 +720,263 @@ self.push_modify_request(modify_request)
 
 策略中的持仓变量若只是策略内部决策状态，可以保留；系统权威持仓应从 `EVENT_POSITION` 或 `engine.oms` 获取。
 
-### 8.1 期权策略与分析面板
+### 8.1 期权架构总览
 
-期权合约的基础信息和最新行情与其他资产使用相同路径：
+期权没有独立的账户、OMS、撮合或 Security 子系统。框架将一张期权合约首先
+视为普通可交易标的，只有策略分析层才引入 IV、Greeks 和期权截面：
 
 ```text
-OptionStateData / TradeBar / QuoteBar / Tick
--> TimeSlice.security_updates
--> SecurityManager
--> OptionContract
+合约信息源
+-> OptionStateReader
+-> OptionStateData
+                         \
+期权/标的行情源            -> TimeSlice.security_updates
+-> TradeBar/Tick/QuoteBar /   -> EVENT_DATA
+                               -> SecurityManager
+                               -> OptionContract / Security
+
+分析指标源
+-> OptionAnalyticsReader
+-> OptionAnalyticsData
+-> TimeSlice.slice
+-> Slice.option_analytics[data_name][instrument_id]
+                                      \
+SecurityManager ----------------------- -> OptionPanelAssembler
+                                           -> OptionPanelView
+                                           -> OptionStrategy
 ```
 
-`OptionContract` 不保存 IV 或 Greeks。模型输出使用带版本信息的
-`OptionAnalyticsData`，只作为策略数据进入
-`Slice.option_analytics[data_name][instrument_id]`，不进入
-`security_updates` 或 `valuation_updates`。
+边界的核心含义是：
 
-期权策略可继承 `OptionStrategy`：
+- `SecurityManager` 管理可以被交易、撮合和估值信任的标的事实；
+- `OptionAnalyticsData` 表示特定模型和版本在特定时间计算出的策略输入；
+- `OptionPanelAssembler` 只在策略侧把两者按 `instrument_id` 关联；
+- `OptionPanelView` 是当前策略回调的临时分析视图，不是新的系统状态；
+- OMS、Gateway、账户、撮合和通用 Engine 均不依赖期权分析指标。
+
+### 8.2 SecurityManager 如何处理期权
+
+`SecurityManager` 把期权当作普通 `Security`。第一次收到
+`OptionStateData` 时，它创建或升级为 `OptionContract`；之后在同一个对象
+上持续应用合约状态和行情。
+
+`OptionContract` 相比通用 `Security` 只增加合约身份字段：
+
+- `underlying_instrument_id`；
+- `expiry`；
+- `strike`；
+- `right`；
+- `style`。
+
+从 `Security` 继承并维护：
+
+- `exchange`、`multiplier`、保证金率和手续费率；
+- `list_date`、`delist_date`、`is_active`、`is_tradable`；
+- 最新价格、OHLC、成交量、成交额、持仓量；
+- 最新盘口和买卖量。
+
+`OptionContract` 明确不保存：
+
+- IV；
+- Delta、Gamma、Vega、Theta、Rho；
+- Vanna、Vomma、Charm；
+- 波动率曲面或定价模型状态。
+
+这些值不是交易所合约的唯一事实。同一时刻可以因模型、远期、利率、曲面和
+版本不同而存在多个合法结果，把它们写入唯一 `OptionContract` 会破坏状态
+所有权。旧式的 `security.iv`、`security.delta` 等访问已经删除，新的访问
+方式是：
+
+```python
+view.security.close
+view.security.strike
+view.analytics.surface_iv
+view.analytics.delta
+```
+
+### 8.3 三类输入和 TimeSlice 路由
+
+#### 8.3.1 合约信息
+
+使用 `OptionStateReader` 将原始合约表转换为 `OptionStateData`：
+
+```python
+instrument_stream = OptionStateReader(
+    schema={
+        "instrument_id": "order_book_id",
+        "underlying_instrument_id": "underlying_order_book_id",
+        "expiry": "maturity_date",
+        "strike": "strike_price",
+        "right": "option_type",
+        "style": "exercise_type",
+        "multiplier": "contract_multiplier",
+    }
+).read(instrument_frame, exchange=Exchange.CFFEX)
+```
+
+合约状态只能加入 `security_data_names`。无生效时间的静态定义形成 bootstrap
+TimeSlice；带日期和生命周期的数据按第 5.2 节规则进入历史时间轴。
+
+#### 8.3.2 期权和标的行情
+
+行情使用通用 `TradeBarReader`、`TickReader` 或其他标准 Reader。期权行情
+至少应路由到 `security_data_names`，确保策略执行前 `OptionContract` 已是
+当前状态。是否同时进入策略和估值，由使用场景决定：
+
+```python
+DataRoutingConfig(
+    strategy_data_names={
+        "option_daily",
+        "underlying_daily",
+        "mo_black76_v1",
+    },
+    security_data_names={
+        "option_instruments",
+        "underlying_instruments",
+        "option_daily",
+        "underlying_daily",
+    },
+    valuation_data_names={
+        "option_daily",
+        "underlying_daily",
+    },
+)
+```
+
+行情只进入 `slice` 时，策略可以看到它，但 SecurityManager 不会更新；只进入
+`security_updates` 时，策略可通过 SecurityManager 读取最新状态，但原始行情
+不会出现在策略 Slice 的 bars/ticks 索引中。
+
+#### 8.3.3 分析指标
+
+使用 `OptionAnalyticsReader` 读取逐时间、逐合约的模型结果：
+
+```python
+analytics_stream = OptionAnalyticsReader(
+    schema={
+        "instrument_id": "order_book_id",
+        "time": "date",
+        "underlying_instrument_id": "underlying_order_book_id",
+        "underlying_price": "underlying_close",
+        "risk_free_rate": "r",
+        "surface_iv": "iv",
+    }
+).read(
+    analytics_frame,
+    model_id="black76_grid",
+    model_version="v1",
+    exchange=Exchange.CFFEX,
+)
+```
+
+`model_id` 和 `model_version` 必须非空。Analytics 支持：
+
+- 定价输入：标的价格、远期价格、无风险利率、剩余期限；
+- IV：`market_iv`、`surface_iv`；
+- Delta、Gamma、Vega、Theta、Rho；
+- Vanna、Vomma、Charm 等高阶指标；
+- `metadata` 中的其他模型或输入版本说明。
+
+缺失指标使用 `None`，不会导致合约从 Panel 中消失。非有限值、负 IV 和负剩余
+期限会被拒绝。`T_days` 到年化期限的转换属于数据标准化步骤，应在 Reader
+之前完成，避免 Reader 猜测日计数规则。
+
+Analytics 数据源必须只加入 `strategy_data_names`。回测 Router 会拒绝将其
+路由到 Security 或 valuation，防止模型输出覆盖最新市场状态或成为账户估值
+权威。
+
+### 8.4 Slice 索引与多周期行为
+
+当前 Slice 的 Analytics 索引是：
+
+```text
+Slice.option_analytics
+└── data_name
+    └── instrument_id
+        └── OptionAnalyticsData
+```
+
+同一 Slice 可以包含多个模型数据源：
+
+```python
+grid = slice_.option_analytics.get("mo_black76_v1", {})
+svi = slice_.option_analytics.get("mo_svi_v2", {})
+```
+
+Analytics 不要求每个 TimeSlice 都出现。比如行情每分钟进入，而 Greeks 每日
+收盘计算一次，只有收盘 Slice 才包含日频 Analytics。缺少配置的数据源时
+`OptionStrategy` 不组装 Panel，也不调用 `on_option_panel()`。
+
+同一个 Analytics 数据源中的记录必须属于当前同一 Slice 时间。
+`OptionPanelAssembler` 会拒绝混合多个时刻的输入。多个 underlying 可以同时
+存在，Assembler 不做拆分；按 underlying、expiry、right 或策略 universe
+分组属于策略责任。
+
+### 8.5 OptionPanelAssembler 和 Panel 结构
+
+Assembler 的签名为：
+
+```python
+panel = OptionPanelAssembler.build(
+    security_manager,
+    analytics_data,
+)
+```
+
+它以 Analytics 为驱动：
+
+```text
+for analytics in analytics_data:
+    security = security_manager.get(analytics.instrument_id)
+    contracts[instrument_id] = OptionContractView(
+        security=security,
+        analytics=analytics,
+    )
+```
+
+它不会扫描 SecurityManager 中的股票、期货或无关期权，也不会计算指标、修改
+Security、过滤不可交易合约或按 underlying 分组。
+
+严格错误边界：
+
+- Analytics 映射键必须等于对象的 `instrument_id`；
+- 对应 Security 必须已经初始化；
+- 对应对象必须是 `OptionContract`；
+- 一次组装的数据必须只有一个时间。
+
+组装结果：
+
+```text
+OptionPanelView
+├── time
+└── contracts: dict[instrument_id, OptionContractView]
+    ├── security: OptionContract
+    └── analytics: OptionAnalyticsData
+```
+
+`OptionContractView.security` 是 SecurityManager 中的可变当前对象。因此
+Panel 对象只保证当前 `on_data()` 回调期间的语义，不应作为历史快照长期
+保存。需要保存或进行横截面向量运算时调用：
+
+```python
+frame = panel.to_frame()
+```
+
+DataFrame 是调用时生成的独立快照，以 `instrument_id` 为索引，包含合约身份、
+生命周期、最新行情、Analytics、模型和版本列。可以自由分组：
+
+```python
+for (underlying, expiry), chain in frame.groupby(
+    ["underlying_instrument_id", "expiry"]
+):
+    ...
+```
+
+修改返回的 DataFrame 不会修改 SecurityManager 或 Analytics 对象。
+
+### 8.6 OptionStrategy 调用方式
+
+期权策略继承 `OptionStrategy`，它本身继承 `StrategyBase`：
 
 ```python
 from autotrade.strategy import OptionPanelView, OptionStrategy
@@ -746,11 +988,15 @@ class MyOptionStrategy(OptionStrategy):
         panel: OptionPanelView,
         slice_,
     ) -> None:
-        frame = panel.to_frame()
-        # 按 underlying、expiry 或其他条件由策略自行分组和分析
+        for view in panel.contracts.values():
+            if not view.security.is_tradable:
+                continue
+            if view.analytics.delta is None:
+                continue
+            # 期权策略逻辑
 ```
 
-初始化时指定分析数据源：
+初始化时指定唯一的 Analytics `data_name`：
 
 ```python
 strategy = MyOptionStrategy(
@@ -758,22 +1004,58 @@ strategy = MyOptionStrategy(
     security_manager=security_manager,
     option_analytics_data_name="mo_black76_v1",
 )
+strategy.initialize()
 ```
 
-`OptionStrategy.on_data()` 保留 `StrategyBase` 原有的 tick/bar 分发。只有当前
-Slice 包含配置的数据源时，它才调用同一模块中的
-`OptionPanelAssembler`。Assembler 以 Analytics 的 `instrument_id` 查询
-`SecurityManager` 并生成策略私有的 `OptionPanelView`，不会扫描全部
-Security，也不会按 underlying 或到期日分组。
+`OptionStrategy.on_data()` 的固定行为：
 
-`OptionPanelView.contracts` 是
-`instrument_id -> OptionContractView` 映射，其中每个 View 同时提供：
+```text
+1. 调用 StrategyBase.on_data()
+   -> 保留标准 tick/bar 分发
+2. 从 slice.option_analytics 读取配置的数据源
+3. 数据不存在或为空
+   -> 返回，不组装
+4. 调用 OptionPanelAssembler.build()
+5. 调用具体策略的 on_option_panel(panel, slice_)
+```
 
-- `view.security`：合约基础信息和 SecurityManager 当前行情；
-- `view.analytics`：当前 Slice 的 IV、Greeks、模型及版本信息。
+如果具体策略重写 `on_data()`，必须自行调用 `super().on_data(slice_)`，否则会
+跳过基础分发和 Panel 组装。通常只应重写 `on_option_panel()`。
 
-Panel 可以包含多个 underlying。对象视图只适用于当前策略回调；需要横截面
-分析或保存快照时使用 `panel.to_frame()`。
+### 8.7 存储和版本建议
+
+历史大宽表可以作为研究导出或兼容输入，但不应成为唯一权威数据。推荐物理或
+逻辑上分别维护：
+
+```text
+option_instruments
+option_market
+underlying_market
+option_analytics/model=<model_id>/version=<model_version>
+```
+
+新增 Vomma 等指标时只重建 Analytics；更换曲面或模型时写入新版本，不能覆盖
+旧版本。合约定义和原始行情不随模型重算。
+
+### 8.8 旧接口迁移
+
+v0.4.0 已删除：
+
+- `OptionContract.iv/delta/gamma/vega/theta`；
+- 核心 `OptionChain`；
+- `Slice.option_chains`。
+
+迁移关系：
+
+```text
+OptionContract.delta
+-> OptionContractView.analytics.delta
+
+Slice.option_chains
+-> Slice.option_analytics
+-> OptionPanelAssembler.build(...)
+-> OptionPanelView
+```
 
 ## 9. 插件和扩展
 
