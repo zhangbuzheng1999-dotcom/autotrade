@@ -74,6 +74,18 @@ Security 管理；IV、Greeks 和波动率曲面只作为带模型版本的策�
   - DataFrame 为 150 行；
   - 148 行 Delta 有效。
 
+### 后续文档维护
+
+- 完整扩充 `FRAMEWORK_GUIDE.md` 的期权章节，说明：
+  - SecurityManager 将期权作为普通 Security 管理，不持有 IV 或 Greeks；
+  - 合约信息、行情和 Analytics 的独立数据来源及 TimeSlice 路由；
+  - `Slice.option_analytics` 的数据结构和多周期行为；
+  - `OptionPanelAssembler` 的职责、严格错误边界和多 underlying 支持；
+  - `OptionStrategy` 的标准调用流程；
+  - `OptionPanelView` 的对象访问、DataFrame 快照和生命周期；
+  - 历史数据存储、模型版本管理和旧接口迁移方式。
+- 新建本改动日志，后续公开接口或架构行为变化应与代码在同一提交中记录。
+
 ## [0.3.0] - 2026-07-25
 
 ### 架构主题
