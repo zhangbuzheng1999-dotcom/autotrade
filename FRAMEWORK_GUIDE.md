@@ -3,6 +3,9 @@
 > 架构版本：v0.3.0  
 > 版本日期：2026-07-25  
 > 适用范围：当前 `src/autotrade` 的统一实盘/回测运行时
+>
+> 下一阶段：期权数据解耦目标版本为 v0.4.0，实施边界见
+> `OPTION_DATA_REFACTOR_PLAN.md`。该计划尚未改变当前 v0.3.0 运行时行为。
 
 本文是当前框架的交接文档。它面向使用者、Gateway 开发者、策略开发者和后续维护代码的 AI。修改架构前，应先核对本文描述和测试；如果代码行为发生变化，应在同一个提交中更新本文。
 
@@ -217,7 +220,287 @@ OMS、Strategy、其他插件
 
 实盘与回测必须使用同一个 `SecurityManager` 实现和同一个实例；`BacktestGateway` 的撮合、手续费、保证金和估值都读取该实例。
 
-### 5.2 OmsBase
+### 5.2 标的信息导入、生命周期与 Security 更新
+
+#### 5.2.1 设计模型
+
+`SecurityManager` 不主动读取数据库、CSV 或 DataFrame。运行时创建它时，
+其内部 `securities` 字典为空；它绑定共享 `event_engine` 并只消费
+`EVENT_DATA`。标的信息导入分为三层：
+
+1. **原始信息表**：数据库或 DataFrame 中的合约定义和历史属性；
+2. **状态事件**：Reader 将每行转换为带生效时间的
+   `InstrumentStateData`；
+3. **运行时对象**：`SecurityManager` 根据状态类型创建或更新唯一的
+   `Security`。
+
+具体类型映射为：
+
+| 状态数据 | 运行时对象 |
+| --- | --- |
+| `InstrumentStateData` | `Security` |
+| `EquityStateData` | `EquitySecurity` |
+| `FutureStateData` | `FutureContract` |
+| `OptionStateData` | `OptionContract` |
+
+状态数据表示“从 `time` 开始生效的一份完整标的状态快照”，不是
+`Security` 本身。`Security` 则是一个随时间持续更新、可被 Gateway、
+策略和其他组件查询的运行时对象。
+
+期货信息的完整导入链路为：
+
+```text
+期货信息表
+-> _InstrumentFrameNormalizer.expand()
+-> FutureStateReader
+-> FutureStateData 流
+-> DataManager 按 time 与行情同步
+-> TimeSlice.security_updates
+-> TimeSliceDriver 发布 EVENT_DATA
+-> SecurityManager._apply_instrument_state()
+-> 创建或更新 FutureContract
+```
+
+第一次收到某个 `instrument_id` 的 `FutureStateData` 时，
+`SecurityManager` 创建 `FutureContract`；以后再收到同一
+`instrument_id` 的状态时，对同一个对象调用 `apply_state()`，不会为每次
+属性变化创建新对象。更新字段包括：
+
+- `is_active`、`is_tradable` 和 `exchange`；
+- `multiplier`、`margin_rate` 和各方向手续费率；
+- `list_date`、`delist_date` 和 `attributes`；
+- 期货的 `expiry`、`root_instrument_id`；
+- 期权的标的、到期日、行权价、方向和行权方式。
+
+行情也是通过 `EVENT_DATA` 更新同一个对象。`TradeBar`、`Tick` 或
+`QuoteBar` 会更新最新价格、OHLC、盘口、成交量和持仓量，但不会建立第二份
+合约缓存。
+
+#### 5.2.2 信息表字段
+
+通用状态字段为：
+
+| 标准字段 | 含义 | 默认别名示例 |
+| --- | --- | --- |
+| `instrument_id` | 唯一合约标识 | `order_book_id`、`symbol`、`code` |
+| `date` | 本行完整状态的生效时间 | `effective_date`、`effective_time` |
+| `list_date` | 上市生效日期 | `listed_date`、`start_date` |
+| `delist_date` | 失效日期 | `delisted_date`、`end_date` |
+| `is_active` | 从 `date` 起是否有效 | `active` |
+| `multiplier` | 合约乘数 | `contract_multiplier`、`size` |
+| `margin_rate` | 保证金率 | `initial_margin_rate` |
+| `commission_rate` | 通用手续费率 | `fee_rate` |
+| `long_commission_rate` | 多方向手续费率 | `long_rate` |
+| `short_commission_rate` | 空方向手续费率 | `short_rate` |
+| `expiry` | 期货/期权到期时间 | `expiry_date`、`maturity_date` |
+| `root_instrument_id` | 期货品种代码 | `root_symbol`、`product` |
+
+无法由默认别名识别的列应显式传入 `schema`。例如原表使用
+`underlying_symbol` 表示期货品种、使用 `delistdate` 表示退市日：
+
+```python
+reader = FutureStateReader(
+    schema={
+        "instrument_id": "instrument_id",
+        "root_instrument_id": "underlying_symbol",
+        "list_date": "list_date",
+        "delist_date": "delistdate",
+        "multiplier": "contract_multiplier",
+        "margin_rate": "initial_margin_rate",
+        "commission_rate": "fee_rate",
+        "expiry": "expiry_date",
+    }
+)
+
+states = reader.read(futures_df, exchange=Exchange.CFFEX)
+```
+
+未映射为标准字段的其他列会保存在 `state.attributes` 中，并在更新后复制到
+`security.attributes`。低频使用的交易时段、品种名称等信息适合放在这里；
+撮合、保证金或风控频繁使用的字段应定义为正式字段。
+
+对期货而言，`root_instrument_id` 通常表示 `IF`、`IH` 这样的期货品种。
+如果 `underlying_symbol` 表示 `000300.SH` 这样的真实现货标的，不应将它
+映射成 `root_instrument_id`，而应作为独立附加字段保存在
+`attributes`。
+
+#### 5.2.3 信息表的四种形态
+
+`_InstrumentFrameNormalizer` 将静态信息和历史状态统一展开为
+`date + instrument_id + 完整状态` 的事件表。`date` 表示状态生效时间，
+不是普通交易日期。输入可以分成四种情况：
+
+| 原表有 `date` | 有 `list_date`/`delist_date` | 场景 | 处理结果 |
+| --- | --- | --- | --- |
+| 否 | 否 | 固定配置、连续或永久有效标的 | 保留 `date=NaT`，生成 bootstrap 状态 |
+| 否 | 是 | 属性固定的普通到期合约 | 用生命周期日期生成上市/退市状态 |
+| 是 | 否 | 属性会变化，但当前数据不管理生命周期 | 保留所有历史状态，默认持续有效 |
+| 是 | 是 | 完整的合约状态历史 | 保留历史状态，并补齐上市/退市状态 |
+
+**无 date、无生命周期**
+
+```text
+instrument_id  multiplier  margin_rate
+HK.MHImain     10          0.10
+```
+
+会产生 `time=None` 的 `FutureStateData`。`DataManager` 将所有无时间状态
+组成一个 `is_bootstrap=True` 的 `TimeSlice`，在第一根历史行情之前初始化
+`SecurityManager`，但不调用策略、不撮合也不估值。
+
+**无 date、有生命周期**
+
+```text
+instrument_id  list_date   delist_date  multiplier
+IF2608         2026-06-22  2026-08-21   300
+```
+
+展开为：
+
+```text
+date        instrument_id  is_active  multiplier
+2026-06-22  IF2608         True       300
+2026-08-21  IF2608         False      300
+```
+
+当存在 `list_date` 时，合成的上市状态替代原来的无日期定义，不再作为
+bootstrap 状态。如果只有 `delist_date`，无日期定义仍负责 bootstrap，
+并在退市日另外产生失效状态；如果只有 `list_date`，则只产生上市状态，
+不会自动失效。
+
+**有 date、无生命周期**
+
+```text
+date        instrument_id  multiplier  margin_rate
+2026-01-01  IF2608         300         0.12
+2026-07-01  IF2608         300         0.15
+```
+
+两行均作为 `is_active=True` 的完整状态事件进入时间轴。框架会在
+`2026-07-01` 更新同一个 `FutureContract` 的保证金率，但由于没有退市
+信息，该对象之后仍保持有效。
+
+**有 date、有生命周期**
+
+原有 `date` 行全部保留；如果 `list_date` 没有对应状态，则从上市日或上市
+日之前最近的完整状态补一条 `is_active=True` 记录；`delist_date` 总是从
+该日期或之前最近的完整状态复制一条 `is_active=False` 记录。例如：
+
+```text
+date        active  multiplier  margin_rate
+2026-06-22  True    300         0.12
+2026-07-10  True    300         0.15
+2026-08-21  False   300         0.15
+```
+
+框架不会用上市日之后的未来状态倒推上市时的属性。如果没有
+`date <= list_date` 的状态，也没有可用的无日期基础定义，会明确报错。
+同一标的存在多个冲突的 `list_date` 或 `delist_date` 也会报错。
+
+#### 5.2.4 加入回测 TimeSlice
+
+合约状态数据源必须路由到 `security_data_names`，不能作为估值源：
+
+```python
+data = DataManager(
+    DataRoutingConfig(
+        strategy_data_names={"1m"},
+        security_data_names={"instruments", "1m"},
+        valuation_data_names={"1m"},
+    )
+)
+
+data.add_data(
+    "instruments",
+    FutureStateReader(schema={...}).read(
+        futures_df,
+        exchange=Exchange.CFFEX,
+    ),
+)
+data.add_data(
+    "1m",
+    TradeBarReader().read(
+        bars_df,
+        interval=Interval.K_1M,
+        exchange=Exchange.CFFEX,
+    ),
+)
+
+engine.run(data.stream())
+```
+
+`DataManager` 将各数据源按 `time` 合并。相同时间的状态和行情进入同一个
+`TimeSlice`，其中标的状态会排在行情更新之前。`TimeSliceDriver` 又会在
+策略和模拟撮合之前同步发布全部 `security_updates`，因此回测中
+`put()` 返回时更新已经完成：
+
+```text
+instrument state -> SecurityManager
+market state     -> SecurityManager
+market.before
+strategy slice
+market.after
+valuation
+```
+
+例如退市状态进入时间片后，同一时刻的策略执行前就有：
+
+```python
+security = engine.security_manager["IF2608"]
+assert security.is_active is False
+assert security.is_tradable is False
+```
+
+输入到 `DataManager` 的各条流必须已经按 `(time, instrument_id)` 升序
+排列，并且 `DataManager` 是单次消费对象。
+
+#### 5.2.5 实盘初始化和更新
+
+实盘应尽量走相同的事件边界。Gateway 或合约数据适配器把券商合约定义转换为
+`FutureStateData`，再通过 `EVENT_DATA` 或 `LiveDataManager` 对应的
+`TimeSlice.security_updates` 发布。不要直接修改
+`security_manager.securities`。
+
+启动时需要立即可用、但不应触发策略的合约，应在策略接收第一份行情前发布
+`EVENT_DATA`。回测 `DataManager` 会把 `time=None` 解释为专门的 bootstrap
+状态；实盘 `LiveDataManager.push()` 则会把缺失时间替换成当前时间，二者
+不能混为一谈。测试或装配代码可以直接调用
+`security_manager.on_data(state)`，但正式组件之间仍应使用事件协议。
+
+实盘 `EventEngine` 异步处理并保持队列顺序；回测
+`BacktestEventEngine` 同步排空。因此实盘调用方如果刚发布状态就立即在
+当前回调线程读取 `SecurityManager`，不能假设异步事件已经处理完成；策略
+通过后续 `EVENT_SLICE` 读取时，`TimeSliceDriver` 的发布顺序仍保证状态事件
+先入队。
+
+#### 5.2.6 数据约束和已知边界
+
+1. **每个 dated 行必须是完整快照。** Reader 不把带 `date` 的行当作增量
+   patch。缺失的乘数、保证金率或手续费率会使用字段默认值，而不会继承上一
+   行。稀疏历史表应在导入前按 `instrument_id, date` 排序并向前填充。
+2. **明确 `delist_date` 的业务含义。** 日期值会标准化为当天 `00:00`，
+   `is_active=False` 从该时刻开始生效。如果数据源中的 `delist_date`
+   表示“最后交易日”，这会使合约在最后交易日开盘前失效；此时应提供收盘后
+   的精确失效时间，或转换为下一交易日的 `00:00`。长期应区分
+   `last_trading_date` 和 `delist_effective_time`。
+3. **`is_active` 不会从行情推断。** 没有显式字段时 dated 状态默认
+   `True`；暂停、恢复等状态必须作为显式状态事件提供。
+4. **同一时刻退市状态最终优先。** 如果 `delist_date` 当天已有一条有效
+   状态，Normalizer 仍追加失效状态；同一 TimeSlice 中先应用有效状态、
+   再应用失效状态，最终对象为失效状态。
+5. **不要混淆到期和退市。** `expiry` 是合约到期属性，
+   `delist_date`/失效状态决定运行时是否可交易；当前框架不会仅根据
+   `expiry` 自动把合约设为失效。
+
+核心回归测试位于：
+
+- `tests/test_instrument_reader.py`：四种输入形态和生命周期展开；
+- `tests/test_data_pipeline.py`：bootstrap、属性变更和
+  `SecurityManager` 更新；
+- `tests/test_routed_runtime.py`：状态先于策略消费的运行时顺序；
+- `tests/test_state_ownership.py`：`SecurityManager` 的唯一状态所有权。
+
+### 5.3 OmsBase
 
 `OmsBase` 是已确认交易状态的运行时投影和查询入口。
 
@@ -239,7 +522,7 @@ OMS、Strategy、其他插件
 
 回测直接使用 `OmsBase`，不再维护一套 Backtest OMS。回测资金账本由 `BacktestGateway.AccountLedger` 负责，OMS 只消费 Gateway 发布的标准事件。
 
-### 5.3 Gateway
+### 5.4 Gateway
 
 Gateway 是执行系统边界。
 
@@ -259,7 +542,7 @@ BacktestGateway：
 - 内部组合订单簿、撮合器、账户账本和发布器；
 - 对外只发布与实盘相同的标准事件。
 
-### 5.4 Reporting
+### 5.5 Reporting
 
 `BacktestRecorder` 只复制权威状态，不重新计算账户。
 
