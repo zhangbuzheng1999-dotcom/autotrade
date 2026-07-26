@@ -1130,6 +1130,18 @@ pytest -q tests
 - `tests/test_numeric_safety.py`：撮合、账本和绩效数值安全；
 - `tests/test_instrument_reader.py`：标的状态读取。
 
+本地 MO 期权宽表的手动集成验证：
+
+```bash
+# 前 5 个交易日
+PYTHONPATH=src python tests/manual_validate_mo_pipeline.py --max-dates 5
+
+# 完整数据
+PYTHONPATH=src python tests/manual_validate_mo_pipeline.py
+```
+
+该脚本默认只在内存中拆分和验证，不修改源文件，也不写出中间数据。
+
 ## 12. 当前限制
 
 当前版本仍有以下已知限制，使用者不应误判为完整能力：

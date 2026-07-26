@@ -86,6 +86,27 @@ Security 管理；IV、Greeks 和波动率曲面只作为带模型版本的策�
   - 历史数据存储、模型版本管理和旧接口迁移方式。
 - 新建本改动日志，后续公开接口或架构行为变化应与代码在同一提交中记录。
 
+### 后续验证工具
+
+- 新增 `tests/manual_validate_mo_pipeline.py`，对本地 MO 期权宽表执行只读
+  集成验证：
+  - 将宽表逻辑拆分为合约基础信息、日行情和 Analytics 三部分；
+  - 统一混合的 `maturity_date` 日期表示后校验合约静态属性；
+  - 分别通过 `OptionStateReader`、`TradeBarReader` 和
+    `OptionAnalyticsReader` 建立三条数据流；
+  - 使用 `DataManager` 合并 TimeSlice 并更新 `SecurityManager`；
+  - 按日调用 `OptionPanelAssembler`，检查 Panel、DataFrame 和当前
+    Security 行情时间的一致性；
+  - 可用 `--max-dates` 做短窗口验证，用 `--output-dir` 选择性写出三份
+    pickle，默认不写文件。
+- 完整 MO 验证结果：
+  - 原始记录 236,514 行；
+  - 953 个交易日、3,052 张历史合约；
+  - 成功生成 953 个 Panel，共组装 236,514 条合约分析记录；
+  - 单日 Panel 包含 150–382 张合约；
+  - `surface_iv` 和 Delta 各有 217,214 条有效值；
+  - 数据范围为 2022-07-22 至 2026-06-30。
+
 ## [0.3.0] - 2026-07-25
 
 ### 架构主题
