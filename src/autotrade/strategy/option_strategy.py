@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime as Datetime
-
 import pandas as pd
 
 from autotrade.coreutils.object import (
@@ -27,9 +25,8 @@ class OptionContractView:
 
 @dataclass(slots=True)
 class OptionPanelView:
-    """Strategy-local option analytics panel for one Slice time."""
+    """Strategy-local joined view of option Security and analytics data."""
 
-    time: Datetime
     contracts: dict[str, OptionContractView]
 
     def to_frame(self) -> pd.DataFrame:
@@ -101,12 +98,6 @@ class OptionPanelAssembler:
         if not analytics_data:
             return None
 
-        times = {analytics.time for analytics in analytics_data.values()}
-        if len(times) != 1:
-            raise ValueError(
-                "option analytics data must belong to one Slice time"
-            )
-
         contracts = {}
         for key, analytics in analytics_data.items():
             if key != analytics.instrument_id:
@@ -129,10 +120,7 @@ class OptionPanelAssembler:
                 analytics=analytics,
             )
 
-        return OptionPanelView(
-            time=next(iter(times)),
-            contracts=contracts,
-        )
+        return OptionPanelView(contracts=contracts)
 
 
 class OptionStrategy(StrategyBase):

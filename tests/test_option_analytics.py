@@ -183,12 +183,43 @@ class OptionAnalyticsTests(unittest.TestCase):
         panel = OptionPanelAssembler.build(securities, analytics)
 
         self.assertIsNotNone(panel)
+        self.assertFalse(hasattr(panel, "time"))
         self.assertEqual(set(panel.contracts), {"MO-C", "IO-P"})
         self.assertIsInstance(panel.contracts["MO-C"].security, OptionContract)
         frame = panel.to_frame()
         self.assertEqual(frame.loc["MO-C", "close"], 120)
         self.assertEqual(frame.loc["IO-P", "delta"], -0.4)
         self.assertNotIn("IF2401", frame.index)
+
+    def test_assembler_only_joins_and_does_not_own_time_semantics(self):
+        securities = SecurityManager()
+        for instrument_id in ("MO-C", "IO-P"):
+            securities.on_data(
+                OptionStateData(
+                    instrument_id=instrument_id,
+                    time=None,
+                    is_active=True,
+                )
+            )
+        analytics = {
+            "MO-C": OptionAnalyticsData(
+                instrument_id="MO-C",
+                time=datetime(2024, 1, 2),
+                model_id="black76",
+                model_version="v1",
+            ),
+            "IO-P": OptionAnalyticsData(
+                instrument_id="IO-P",
+                time=datetime(2024, 1, 3),
+                model_id="black76",
+                model_version="v1",
+            ),
+        }
+
+        panel = OptionPanelAssembler.build(securities, analytics)
+
+        self.assertEqual(set(panel.contracts), {"MO-C", "IO-P"})
+        self.assertFalse(hasattr(panel, "time"))
 
     def test_option_strategy_only_assembles_when_configured_analytics_arrive(self):
         when = datetime(2024, 1, 2)

@@ -107,6 +107,18 @@ Security 管理；IV、Greeks 和波动率曲面只作为带模型版本的策�
   - `surface_iv` 和 Delta 各有 217,214 条有效值；
   - 数据范围为 2022-07-22 至 2026-06-30。
 
+### 后续接口精简
+
+- 删除 `OptionPanelView.time`。Panel 只保存按 `instrument_id` 合并后的
+  `contracts` 并提供 `to_frame()`；当前策略时间统一从 `slice_.time` 获取。
+- `OptionPanelAssembler` 删除 Analytics 时间收集和同时间校验，只负责：
+  - 校验 Analytics 映射键；
+  - 按 `instrument_id` 查询 `OptionContract`；
+  - 创建 `OptionContractView`；
+  - 返回 `OptionPanelView`。
+- Dynamic Collar 每个 Slice 只调用一次 `panel.to_frame()`，并把生成的
+  DataFrame 传给候选打分函数，避免重复展开同一 Panel。
+
 ## [0.3.0] - 2026-07-25
 
 ### 架构主题

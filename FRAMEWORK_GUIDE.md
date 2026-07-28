@@ -907,10 +907,10 @@ Analytics 不要求每个 TimeSlice 都出现。比如行情每分钟进入，�
 收盘计算一次，只有收盘 Slice 才包含日频 Analytics。缺少配置的数据源时
 `OptionStrategy` 不组装 Panel，也不调用 `on_option_panel()`。
 
-同一个 Analytics 数据源中的记录必须属于当前同一 Slice 时间。
-`OptionPanelAssembler` 会拒绝混合多个时刻的输入。多个 underlying 可以同时
-存在，Assembler 不做拆分；按 underlying、expiry、right 或策略 universe
-分组属于策略责任。
+正常运行时，同一个 Analytics 索引由当前 Slice 构造，因此时间语义属于
+`slice_.time`，而不属于 Panel。`OptionPanelAssembler` 不读取或校验
+Analytics 的时间字段。多个 underlying 可以同时存在，Assembler 不做拆分；
+按 underlying、expiry、right 或策略 universe 分组属于策略责任。
 
 ### 8.5 OptionPanelAssembler 和 Panel 结构
 
@@ -941,14 +941,12 @@ Security、过滤不可交易合约或按 underlying 分组。
 
 - Analytics 映射键必须等于对象的 `instrument_id`；
 - 对应 Security 必须已经初始化；
-- 对应对象必须是 `OptionContract`；
-- 一次组装的数据必须只有一个时间。
+- 对应对象必须是 `OptionContract`。
 
 组装结果：
 
 ```text
 OptionPanelView
-├── time
 └── contracts: dict[instrument_id, OptionContractView]
     ├── security: OptionContract
     └── analytics: OptionAnalyticsData
@@ -973,6 +971,7 @@ for (underlying, expiry), chain in frame.groupby(
 ```
 
 修改返回的 DataFrame 不会修改 SecurityManager 或 Analytics 对象。
+当前策略时间始终从 `slice_.time` 获取，不从 Panel 获取。
 
 ### 8.6 OptionStrategy 调用方式
 
