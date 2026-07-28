@@ -3,6 +3,52 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [0.5.0] - 2026-07-28
+
+### 架构主题
+
+精简期权策略视图：`OptionPanelAssembler` 只组合 Security 与 Analytics，
+Panel 保持对象结构；是否转换为 DataFrame 由具体策略按需决定。
+
+### 修改
+
+- 包版本由 `0.4.0` 更新为 `0.5.0`。
+- 删除 `OptionPanelView.time`。当前策略时间统一从 `slice_.time` 获取。
+- `OptionPanelAssembler` 删除 Analytics 时间收集和同时间校验，只负责：
+  - 校验 Analytics 映射键与对象的 `instrument_id`；
+  - 从 SecurityManager 查询相应 `OptionContract`；
+  - 创建 `OptionContractView`；
+  - 返回只包含 `contracts` 的 `OptionPanelView`。
+- `OptionPanelView.to_frame()` 改为动态发现 Security 和 Analytics 的
+  dataclass 字段及只读属性。新增行情字段或 Greek 指标无需维护固定列清单；
+  字段重名时保留 Security 的当前状态。
+- 字段结构按对象类型缓存，避免对面板中的每张期权重复扫描类定义。
+- 明确 `to_frame()` 是策略主动调用的可选便利方法：
+  - 对象逻辑可以直接访问 `panel.contracts`；
+  - 需要分组、筛选、排序或向量化计算时再生成 DataFrame；
+  - Assembler 和 `OptionStrategy` 不会自动创建 DataFrame。
+- Dynamic Collar 每个 Slice 只调用一次 `panel.to_frame()`，并把生成的
+  DataFrame 传给候选打分函数，避免重复展开同一 Panel。
+
+### 兼容性与迁移
+
+这是公开接口调整：
+
+```text
+旧：panel.time
+新：slice_.time
+
+对象访问：panel.contracts[instrument_id]
+按需表格：frame = panel.to_frame()
+```
+
+### 验证
+
+- 40 项自动化测试通过；
+- 新增扩展 Analytics 测试，确认自定义 Greek 字段无需修改 `to_frame()`
+  即可自动成为 DataFrame 列；
+- Dynamic Collar 全量回测结果保持一致，并通过避免重复转换缩短运行时间。
+
 ## [0.4.0] - 2026-07-26
 
 ### 架构主题
@@ -106,21 +152,6 @@ Security 管理；IV、Greeks 和波动率曲面只作为带模型版本的策�
   - 单日 Panel 包含 150–382 张合约；
   - `surface_iv` 和 Delta 各有 217,214 条有效值；
   - 数据范围为 2022-07-22 至 2026-06-30。
-
-### 后续接口精简
-
-- 删除 `OptionPanelView.time`。Panel 只保存按 `instrument_id` 合并后的
-  `contracts` 并提供 `to_frame()`；当前策略时间统一从 `slice_.time` 获取。
-- `OptionPanelAssembler` 删除 Analytics 时间收集和同时间校验，只负责：
-  - 校验 Analytics 映射键；
-  - 按 `instrument_id` 查询 `OptionContract`；
-  - 创建 `OptionContractView`；
-  - 返回 `OptionPanelView`。
-- Dynamic Collar 每个 Slice 只调用一次 `panel.to_frame()`，并把生成的
-  DataFrame 传给候选打分函数，避免重复展开同一 Panel。
-- `OptionPanelView.to_frame()` 改为动态发现 Security 和 Analytics 的
-  dataclass 字段及只读属性；新增行情字段或 Greek 指标无需维护固定列清单。
-  字段重名时保留 Security 的当前状态。
 
 ## [0.3.0] - 2026-07-25
 

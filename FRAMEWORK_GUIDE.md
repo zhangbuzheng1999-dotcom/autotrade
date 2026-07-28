@@ -954,10 +954,22 @@ OptionPanelView
 
 `OptionContractView.security` 是 SecurityManager 中的可变当前对象。因此
 Panel 对象只保证当前 `on_data()` 回调期间的语义，不应作为历史快照长期
-保存。需要保存或进行横截面向量运算时调用：
+保存。策略默认可以直接通过 `panel.contracts` 使用对象视图；只有需要
+DataFrame 分组、筛选、排序或向量化运算时，才主动调用：
 
 ```python
 frame = panel.to_frame()
+```
+
+`OptionPanelAssembler` 和 `OptionStrategy` 都不会自动调用 `to_frame()`，
+是否生成 DataFrame 完全由具体期权策略决定。对象访问示例：
+
+```python
+for instrument_id, contract in panel.contracts.items():
+    security = contract.security
+    analytics = contract.analytics
+    if analytics.delta is not None:
+        ...
 ```
 
 DataFrame 是调用时生成的独立快照，以 `instrument_id` 为索引，包含合约身份、
@@ -1000,6 +1012,10 @@ class MyOptionStrategy(OptionStrategy):
                 continue
             # 期权策略逻辑
 ```
+
+上例直接使用对象视图。如果策略需要横截面表格，可在
+`on_option_panel()` 中主动执行 `frame = panel.to_frame()`；这不是基类的
+强制步骤。
 
 初始化时指定唯一的 Analytics `data_name`：
 
