@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
@@ -23,6 +24,11 @@ from autotrade.strategy.option_strategy import (
     OptionPanelAssembler,
     OptionStrategy,
 )
+
+
+@dataclass(slots=True)
+class ExtendedOptionAnalyticsData(OptionAnalyticsData):
+    custom_greek: float | None = None
 
 
 class OptionAnalyticsTests(unittest.TestCase):
@@ -220,6 +226,33 @@ class OptionAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(set(panel.contracts), {"MO-C", "IO-P"})
         self.assertFalse(hasattr(panel, "time"))
+
+    def test_to_frame_discovers_security_and_analytics_fields(self):
+        securities = SecurityManager()
+        securities.on_data(
+            OptionStateData(
+                instrument_id="MO-C",
+                time=None,
+                is_active=True,
+                margin_rate=0.12,
+            )
+        )
+        analytics = {
+            "MO-C": ExtendedOptionAnalyticsData(
+                instrument_id="MO-C",
+                time=datetime(2024, 1, 2),
+                custom_greek=3.5,
+                model_id="black76",
+                model_version="v2",
+            )
+        }
+
+        panel = OptionPanelAssembler.build(securities, analytics)
+        frame = panel.to_frame()
+
+        self.assertEqual(frame.loc["MO-C", "margin_rate"], 0.12)
+        self.assertEqual(frame.loc["MO-C", "custom_greek"], 3.5)
+        self.assertIn("price", frame.columns)
 
     def test_option_strategy_only_assembles_when_configured_analytics_arrive(self):
         when = datetime(2024, 1, 2)

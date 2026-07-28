@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from functools import lru_cache
 import pandas as pd
 
 from autotrade.coreutils.object import (
@@ -13,6 +14,17 @@ from autotrade.coreutils.object import (
 )
 from autotrade.engine.security_manager import SecurityManager
 from autotrade.strategy.strategy_base import StrategyBase
+
+
+@lru_cache
+def _frame_attribute_names(cls: type) -> tuple[str, ...]:
+    """Return stable dataclass fields and readable properties for one type."""
+    names = [item.name for item in fields(cls)]
+    for base in reversed(cls.__mro__):
+        for name, member in vars(base).items():
+            if isinstance(member, property) and name not in names:
+                names.append(name)
+    return tuple(names)
 
 
 @dataclass(slots=True)
@@ -30,54 +42,14 @@ class OptionPanelView:
     contracts: dict[str, OptionContractView]
 
     def to_frame(self) -> pd.DataFrame:
-        """Build a detached DataFrame snapshot of the current object view."""
+        """Build a detached frame from the fields exposed by both objects."""
         records = []
         for instrument_id, view in self.contracts.items():
-            security = view.security
-            analytics = view.analytics
-            records.append(
-                {
-                    "instrument_id": instrument_id,
-                    "underlying_instrument_id":
-                        security.underlying_instrument_id,
-                    "expiry": security.expiry,
-                    "strike": security.strike,
-                    "right": security.right,
-                    "style": security.style,
-                    "exchange": security.exchange,
-                    "multiplier": security.multiplier,
-                    "is_active": security.is_active,
-                    "is_tradable": security.is_tradable,
-                    "price": security.price,
-                    "open": security.open,
-                    "high": security.high,
-                    "low": security.low,
-                    "close": security.close,
-                    "volume": security.volume,
-                    "turnover": security.turnover,
-                    "open_interest": security.open_interest,
-                    "bid": security.bid,
-                    "ask": security.ask,
-                    "bid_size": security.bid_size,
-                    "ask_size": security.ask_size,
-                    "underlying_price": analytics.underlying_price,
-                    "forward_price": analytics.forward_price,
-                    "risk_free_rate": analytics.risk_free_rate,
-                    "time_to_expiry": analytics.time_to_expiry,
-                    "market_iv": analytics.market_iv,
-                    "surface_iv": analytics.surface_iv,
-                    "delta": analytics.delta,
-                    "gamma": analytics.gamma,
-                    "vega": analytics.vega,
-                    "theta": analytics.theta,
-                    "rho": analytics.rho,
-                    "vanna": analytics.vanna,
-                    "vomma": analytics.vomma,
-                    "charm": analytics.charm,
-                    "model_id": analytics.model_id,
-                    "model_version": analytics.model_version,
-                }
-            )
+            record = {"instrument_id": instrument_id}
+            for value in (view.security, view.analytics):
+                for name in _frame_attribute_names(type(value)):
+                    record.setdefault(name, getattr(value, name))
+            records.append(record)
         if not records:
             return pd.DataFrame()
         return (

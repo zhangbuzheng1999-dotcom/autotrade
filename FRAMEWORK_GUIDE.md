@@ -970,6 +970,12 @@ for (underlying, expiry), chain in frame.groupby(
     ...
 ```
 
+`to_frame()` 不维护固定列清单，而是动态展开 `OptionContract` 和
+`OptionAnalyticsData` 的 dataclass 字段及只读属性。因此新增 Security
+字段或 Greek 指标后会自动成为 DataFrame 列，不需要修改 Assembler。
+同名字段以 Security 的当前状态为准，Analytics 只补充尚不存在的列；
+`instrument_id` 用作索引。
+
 修改返回的 DataFrame 不会修改 SecurityManager 或 Analytics 对象。
 当前策略时间始终从 `slice_.time` 获取，不从 Panel 获取。
 

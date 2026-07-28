@@ -118,6 +118,9 @@ Security 管理；IV、Greeks 和波动率曲面只作为带模型版本的策�
   - 返回 `OptionPanelView`。
 - Dynamic Collar 每个 Slice 只调用一次 `panel.to_frame()`，并把生成的
   DataFrame 传给候选打分函数，避免重复展开同一 Panel。
+- `OptionPanelView.to_frame()` 改为动态发现 Security 和 Analytics 的
+  dataclass 字段及只读属性；新增行情字段或 Greek 指标无需维护固定列清单。
+  字段重名时保留 Security 的当前状态。
 
 ## [0.3.0] - 2026-07-25
 
