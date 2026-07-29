@@ -60,8 +60,9 @@ Reader 和路由协议没有破坏性变化。
 - 开发分支：`rollback-3648d01`。
 - 基线提交：`5fa55c562330a4aefd4866ee9fb2e4eabf7d3306`
   （`docs: release option panel API as v0.5.0`）。
-- 发布提交主题：`feat(backtest): add materialized data manager v0.6.0`。
-- 发布提交哈希在本条目对应实现提交创建后补录。
+- 发布提交：`8c896f6fa5693613cce95eb5388e3cf79578917a`
+  （`feat(backtest): add materialized data manager v0.6.0`）。
+- Git 元数据补录使用独立文档提交，避免发布提交对自身哈希产生循环引用。
 
 ## [0.5.0] - 2026-07-28
 
