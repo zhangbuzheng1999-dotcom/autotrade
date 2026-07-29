@@ -1,8 +1,8 @@
 # Autotrade 框架与使用指南
 
-> 架构版本：v0.4.0
+> 架构版本：v0.6.0
 >
-> 版本日期：2026-07-26
+> 版本日期：2026-07-29
 >
 > 适用范围：当前 `src/autotrade` 的统一实盘/回测运行时
 
@@ -613,13 +613,208 @@ accounts = engine.get_account_daily_df()
 注意：
 
 - 所有输入流必须按 `(time, instrument_id)` 升序排列。
-- `DataManager` 是单次消费对象，调用一次 `stream()` 后不可复用。
+- 默认惰性模式下，`DataManager` 是单次消费对象，调用一次 `stream()` 后
+  不可复用；调用 `materialize()` 后会保留完整 TimeSlice tuple，
+  `stream()` 将变为可重复遍历。
 - 每个 `data_name` 必须至少路由到 strategy/security/valuation 之一。
 - 标的状态数据应加入 `security_data_names`。
 - `valuation_data_names` 决定记录频率，不要无条件把 tick 流加入估值。
 - 多周期数据会按相同时间戳合并为一个 TimeSlice。
 
-### 6.1 成交设置
+### 6.1 两种 TimeSlice 供给模式
+
+`BacktestEngine.run()` 的参数类型是 `Iterable[TimeSlice]`。Engine 只按顺序
+遍历并处理 TimeSlice，不关心 TimeSlice 是在回测过程中生成，还是已经提前
+生成并从内存缓存读取。`DataManager` 因此提供两种兼容模式。
+
+#### 6.1.1 默认惰性流式模式
+
+不调用 `materialize()` 时，`stream()` 返回单次消费的惰性 iterator：
+
+```python
+data = build_data_manager(frames)
+result = engine.run(data.stream())
+```
+
+消费链路为：
+
+```text
+原始 DataFrame
+-> Reader generator 逐行创建标准对象
+-> _DataSynchronizer 合并相同时间
+-> _TimeSliceRouter 路由
+-> 当前 TimeSlice
+-> BacktestEngine
+```
+
+`add_data()` 只注册带 `data_name` 的标准数据 iterable，不会把所有记录或
+TimeSlice 一次性展开。行情、Analytics 和 CustomData Reader 返回的 generator
+仍引用原始 DataFrame；每当 Engine 请求下一个 TimeSlice 时，Reader 才继续
+读取需要的行。
+
+惰性模式特性：
+
+- `stream()` 只能完整消费一次；
+- 原始时间序列 DataFrame 在消费完成前必须存在；
+- 内存主要由原始 DataFrame、当前 TimeSlice、SecurityManager 和回测记录
+  构成；
+- 时间长度增加时，不会把全部历史 TimeSlice 同时留在内存；
+- 中途停止时，尚未消费的记录不会转换成标准对象；
+- 每次重新回测都会重复 Reader 转换、时间同步和路由。
+
+`_sources` 的清理位于 `finally`。正常完成、转换异常或 generator 被关闭时，
+DataManager 都会释放自己持有的 Reader source；调用方自己保存的 `frames`
+变量不属于 DataManager，仍由调用方生命周期管理。
+
+#### 6.1.2 内存物化模式
+
+需要重复遍历或保存标准化结果时，可以在回测前物化：
+
+```python
+data = build_data_manager(frames)
+time_slices = data.materialize()
+
+assert data.is_materialized
+assert data.time_slice_count == len(time_slices)
+
+result = engine.run(data.stream())
+```
+
+`materialize()` 会完整消费一次内部惰性流，将结果保存为：
+
+```text
+DataManager._materialized
+└── tuple[TimeSlice, ...]
+    ├── bootstrap TimeSlice
+    ├── 第一个普通 TimeSlice
+    ├── ...
+    └── 最后一个普通 TimeSlice
+```
+
+只有全部 TimeSlice 成功生成后才设置 `_materialized`。完成后 `_sources` 已经
+清空，DataManager 不再引用 Reader generator 或原始 DataFrame。此后的
+`stream()` 等价于 `iter(data._materialized)`，可以重复调用：
+
+```python
+engine_a.run(data.stream())
+engine_b.run(data.stream())
+```
+
+每次回测应使用新的 Engine、Strategy、SecurityManager 和 OMS；TimeSlice
+数据应当被消费者视为只读输入。
+
+物化模式特性：
+
+- 跳过后续运行中的 Reader 转换、时间同步和路由；
+- `stream()` 可重复遍历；
+- 可以保存并在另一个进程重新加载；
+- 加载时会一次性恢复全部 TimeSlice Python 对象；
+- 已经处理过的 TimeSlice 仍由 `_materialized` tuple 引用，不会在遍历过程
+  中释放；
+- 适合内存充足并需要反复运行同一数据集的研究场景。
+
+#### 6.1.3 保存和加载
+
+`save()` 只接受已经物化、且 `_sources` 为空的 DataManager。这一约束避免把
+不可可靠序列化的 Reader generator 及其原始 DataFrame 引用链写入缓存：
+
+```python
+data = build_data_manager(frames)
+data.materialize()
+data.save("backtest-data.pkl")
+```
+
+重新加载后不需要原始 DataFrame、Reader 或 DataSynchronizer 重新工作：
+
+```python
+from autotrade.backtest.data import DataManager
+
+data = DataManager.load("backtest-data.pkl")
+result = engine.run(data.stream())
+```
+
+pickle 只能加载可信的本地文件。缓存依赖当前 Python 类路径和对象协议；修改
+`TimeSlice`、`Slice`、MarketData 类型或路由语义后应重建缓存，不应把旧缓存
+视为长期稳定的跨版本数据格式。
+
+#### 6.1.4 Dynamic Collar 完整示例
+
+工作区示例位于：
+
+```text
+/home/buzheng/Desktop/strategy/dynamic_collar/
+├── data_gerator.py
+├── run_mo_dynamic_collar.py
+└── run_mo_dynamic_collar_materialized.py
+```
+
+生成完整 MO 物化缓存：
+
+```bash
+cd /home/buzheng/Desktop/strategy/dynamic_collar
+PYTHONPATH=/home/buzheng/Desktop/autotrade/src \
+python data_gerator.py
+```
+
+脚本的核心逻辑是：
+
+```python
+frames, manifest = load_bridge_frames()
+data = build_data_manager(frames)
+data.materialize()
+data.save("mo_dynamic_collar_data_manager.pkl")
+```
+
+默认惰性流式运行：
+
+```bash
+PYTHONPATH=/home/buzheng/Desktop/autotrade/src \
+python run_mo_dynamic_collar.py
+```
+
+从本地物化 DataManager 运行：
+
+```bash
+PYTHONPATH=/home/buzheng/Desktop/autotrade/src \
+python run_mo_dynamic_collar_materialized.py
+```
+
+物化缓存包含 961 个 TimeSlice，其中第一个是 bootstrap，后续 960 个是普通
+交易日 TimeSlice。缓存文件约 126.14 MiB，不包含原始 DataFrame。
+
+#### 6.1.5 性能和内存取舍
+
+MO Dynamic Collar 完整数据的同机实测结果为：
+
+| 模式 | 墙钟时间 | 峰值 RSS |
+| --- | ---: | ---: |
+| 默认惰性流式 | 26.84 秒 | 289.28 MiB |
+| 内存物化，包含缓存加载 | 22.61 秒 | 951.68 MiB |
+| 首次生成并保存物化缓存 | 12.32 秒 | 约 1.04 GiB |
+
+两种运行模式的绩效、决策日志和 639 条成交一致；随机订单 ID 除外。物化模式
+每次节省约 4.23 秒，即约 15.8%，但运行峰值内存约为惰性模式的 3.29 倍。
+首次生成缓存的时间成本约在同一数据运行 3 次后摊平。
+
+磁盘 pickle 大小不能代表加载后的 Python 对象内存。126.14 MiB 缓存加载后，
+DataManager 本身约占 888 MiB RSS，原因包括约 48 万个标准数据对象、Python
+对象头、字符串、datetime、metadata 字典、TimeSlice/Slice 容器和多层索引。
+物化 iterator 只移动遍历位置，不会从 `_materialized` tuple 删除已处理对象。
+
+选择原则：
+
+- 单次回测、长历史、可能提前停止、内存有限：使用默认惰性流式模式；
+- 同一输入反复运行至少约 3 次、内存充足：可以使用内存物化模式；
+- Reader/同步成本占比越高、策略越轻，物化提速越明显；
+- 策略计算占比越高，两种模式耗时差异越小；
+- 数据行数、字段、字符串和小字典越多，物化后的内存膨胀越明显；
+- 多进程参数搜索会让每个进程分别加载完整对象图，应谨慎使用内存物化。
+
+对于既要跳过 Reader，又要保持低内存的大数据场景，后续可增加“逐个
+TimeSlice 写入和读取”的磁盘流式缓存。该模式不属于 v0.6.0 当前公开接口；
+当前 `DataManager.load()` 会一次性加载全部物化 TimeSlice。
+
+### 6.2 成交设置
 
 ```python
 from autotrade.backtest.gateway import BacktestSettings

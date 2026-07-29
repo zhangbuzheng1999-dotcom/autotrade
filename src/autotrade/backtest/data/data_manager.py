@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import chain
+import pickle
+from pathlib import Path
 from typing import Iterable
 
 from autotrade.coreutils.object import (
@@ -41,6 +43,7 @@ class DataManager:
         self._sources: list[_DataSource] = []
         self._data_names: set[str] = set()
         self._consumed = False
+        self._materialized: tuple[TimeSlice, ...] | None = None
 
     def add_data(
         self,
@@ -58,6 +61,12 @@ class DataManager:
         self._sources.append(_DataSource(data_name, records))
 
     def stream(self) -> Iterator[TimeSlice]:
+        """Return either the lazy one-shot stream or a replayable cached iterator."""
+        if self._materialized is not None:
+            return iter(self._materialized)
+        return self._stream_once()
+
+    def _stream_once(self) -> Iterator[TimeSlice]:
         if self._consumed:
             raise RuntimeError("DataManager streams are single-use")
         configured = (
@@ -70,17 +79,68 @@ class DataManager:
             raise ValueError(f"routing references unknown data_names: {sorted(unknown)!r}")
         self._consumed = True
 
-        bootstrap, streams = self._prepare_streams()
-        if bootstrap:
-            yield self._create_bootstrap(tuple(bootstrap))
+        try:
+            bootstrap, streams = self._prepare_streams()
+            if bootstrap:
+                yield self._create_bootstrap(tuple(bootstrap))
 
-        for batch in self._synchronizer.sync(streams):
-            yield self._create_time_slice(
-                batch.time,
-                self._router.route(batch.records),
+            for batch in self._synchronizer.sync(streams):
+                yield self._create_time_slice(
+                    batch.time,
+                    self._router.route(batch.records),
+                )
+        finally:
+            self._sources.clear()
+
+    def materialize(self) -> tuple[TimeSlice, ...]:
+        """Build and retain every TimeSlice, releasing registered source streams."""
+        if self._materialized is not None:
+            return self._materialized
+        if self._consumed:
+            raise RuntimeError(
+                "cannot materialize a DataManager after streaming has started"
             )
 
-        self._sources.clear()
+        materialized = tuple(self._stream_once())
+        self._materialized = materialized
+        return materialized
+
+    @property
+    def is_materialized(self) -> bool:
+        return self._materialized is not None
+
+    @property
+    def time_slice_count(self) -> int:
+        if self._materialized is None:
+            raise RuntimeError("DataManager is not materialized")
+        return len(self._materialized)
+
+    def save(self, path: str | Path) -> None:
+        """Persist a materialized manager without raw Reader source streams."""
+        if self._materialized is None:
+            raise RuntimeError("DataManager must be materialized before saving")
+        if self._sources:
+            raise RuntimeError("materialized DataManager still holds source streams")
+
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as file:
+            pickle.dump(self, file, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "DataManager":
+        """Load and validate a previously materialized manager."""
+        with Path(path).open("rb") as file:
+            manager = pickle.load(file)
+        if not isinstance(manager, cls):
+            raise TypeError(
+                f"expected {cls.__name__}, got {type(manager).__name__}"
+            )
+        if manager._materialized is None:
+            raise ValueError("saved DataManager is not materialized")
+        if manager._sources:
+            raise ValueError("saved DataManager unexpectedly contains source streams")
+        return manager
 
     @staticmethod
     def _create_time_slice(

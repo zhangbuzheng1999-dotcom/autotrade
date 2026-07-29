@@ -3,6 +3,66 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [0.6.0] - 2026-07-29
+
+### 架构主题
+
+为回测数据增加可选的内存物化与持久化能力，同时保留默认的惰性流式执行。
+`BacktestEngine.run()` 继续只依赖 `Iterable[TimeSlice]`，策略、Engine、
+Reader 和路由协议没有破坏性变化。
+
+### 新增
+
+- `DataManager.materialize()`：
+  - 完整消费内部惰性流；
+  - 保留 `tuple[TimeSlice, ...]`；
+  - 成功后释放 `_sources` 中的 Reader iterable；
+  - 物化后的 `stream()` 可重复遍历。
+- `DataManager.save()` 和 `DataManager.load()`：
+  - 只允许保存已物化且不再持有 source 的 DataManager；
+  - 加载后可以直接将 `stream()` 交给 `BacktestEngine.run()`；
+  - 不保存原始 DataFrame 或 Reader generator。
+- `DataManager.is_materialized` 和 `time_slice_count` 只读状态。
+- Dynamic Collar 工作区新增物化缓存生成和运行示例：
+  - `data_gerator.py`；
+  - `run_mo_dynamic_collar_materialized.py`。
+
+### 修改
+
+- 包版本由 `0.5.0` 更新为 `0.6.0`。
+- 原 `DataManager.stream()` 主体拆为 `_stream_once()`；公开 `stream()` 根据
+  状态返回一次性惰性流或物化 tuple 的新 iterator。
+- `_sources.clear()` 移入 `finally`，正常完成、异常和 generator 关闭时均
+  尽力释放 Reader source。
+- `FRAMEWORK_GUIDE.md` 将架构版本更新为 v0.6.0，详细记录两种模式的数据
+  生命周期、保存/加载方式、Dynamic Collar 示例和性能取舍。
+
+### 兼容性
+
+- 现有 `engine.run(data.stream())` 调用无需修改，默认仍是低内存惰性模式。
+- 惰性 `stream()` 仍为单次消费。
+- `materialize()` 必须在惰性消费开始前调用。
+- 物化后的 `stream()` 可重复调用，但每次回测仍应创建独立的运行时状态。
+- pickle 缓存不是承诺长期兼容的跨版本格式；数据对象或路由协议变化后应重建。
+
+### Dynamic Collar 验证
+
+- 完整数据生成 961 个 TimeSlice，缓存文件 132,267,011 字节
+  （126.14 MiB）。
+- 默认惰性模式：26.84 秒，峰值 RSS 289.28 MiB。
+- 物化缓存模式：22.61 秒，峰值 RSS 951.68 MiB。
+- 首次缓存生成：12.32 秒，峰值 RSS 约 1.04 GiB。
+- 两种模式绩效结果、决策日志和 639 条成交一致；仅随机订单 ID 不同。
+- 42 项自动化回归测试通过。
+
+### Git 信息
+
+- 开发分支：`rollback-3648d01`。
+- 基线提交：`5fa55c562330a4aefd4866ee9fb2e4eabf7d3306`
+  （`docs: release option panel API as v0.5.0`）。
+- 发布提交主题：`feat(backtest): add materialized data manager v0.6.0`。
+- 发布提交哈希在本条目对应实现提交创建后补录。
+
 ## [0.5.0] - 2026-07-28
 
 ### 架构主题
