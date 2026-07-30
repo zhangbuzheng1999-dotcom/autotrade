@@ -3,6 +3,72 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [0.7.0] - 2026-07-30
+
+### 架构主题
+
+新增与 RiceQuant Service 调用方式一致的计算型期权 Greeks 资源。纯
+Black97 计算与数据获取、Forward 构造、ClickHouse 持久化解耦，避免继续
+依赖巨型期权宽表作为计算和存储的共同接口。
+
+### 新增
+
+- `autotrade.analytics.options.calculate_black97_greeks()`：
+  - 只接受标准化的最小 Black97 输入；
+  - 输出 IV、Delta、Gamma、Vega、Theta、Rho、Vanna、Vomma 和 Charm；
+  - 不访问数据库或 RiceQuant。
+- `CalculatedOptionGreeksService`：
+  - `DB_ONLY` 直接查询 ClickHouse；
+  - `SOURCE_ONLY` 可以按 `opt_symbol` 或 `order_book_ids` 请求；
+  - 按合约请求时内部计算并持久化完整品种截面，最后裁剪返回结果。
+- `CalculatedOptionGreeksSpec`、DataSource 和 Repository。
+- ClickHouse 表
+  `rq_option_data.calculated_option_greeks_1d`。
+- `tests/test_calculated_option_greeks.py`，验证 SOURCE_ONLY 模式传播和
+  “完整截面先持久化、请求范围后裁剪”。
+- `src/autotrade/data/CALCULATED_OPTION_ANALYTICS.md`，记录架构、API、
+  字段和验证结果。
+
+### SOURCE_ONLY 规则
+
+外层 `CalculatedOptionGreeksService` 使用 `SOURCE_ONLY` 时：
+
+- 合约信息使用 `OptionInstrumentService(SOURCE_ONLY)`；
+- 期权行情使用 `OptionPriceService(SOURCE_ONLY)`；
+- 期货期权所需期货价格使用 `FuturePriceService(SOURCE_ONLY)`；
+- 内部基础数据调用使用 `persist=False`；
+- 外层 `persist=True` 时只持久化最终完整 Greeks 截面。
+
+### Forward 与模型
+
+- 期货期权使用实际对应期货合约收盘价；
+- ETF、指数期权使用 Call/Put 平价候选 Forward 的中位数；
+- 默认 `model_id="black97"`；
+- 默认 `model_version="autotrade_v1"`；
+- 新增运行依赖 `py-vollib==1.0.1`。
+
+### 验证
+
+- AU `2026-07-10` 真实 SOURCE_ONLY 计算 732 行，并完成
+  `SOURCE_ONLY -> ClickHouse -> DB_ONLY` 闭环；
+- 510050 `2026-07-10` 真实 SOURCE_ONLY 计算 96 行；
+- 请求单个 AU 合约时，完整 732 行截面先落库，最终只返回请求合约；
+- 新增文件通过 Python 编译和模式传播断言测试。
+
+### IVX
+
+v0.7.0 未包含 IVX Service。现有算法仍位于 cfutures
+`opt_tools/cal_ivx.py`；计划复用本版本的完整品种截面、模式传播和持久化
+约定，新增 `CalculatedOptionIVXService` 和
+`calculated_option_ivx_1d`。
+
+### 已知限制
+
+- 当前只支持 `frequency="1d"` 和 `price_type="close"`；
+- `DB_THEN_SOURCE` 尚未增加完整截面 coverage 判断；
+- 计算表尚未保存 `underlying_price`；
+- 全项目编译仍会被既有 `gateway_futu.py` 的 f-string 语法错误阻挡。
+
 ## [0.6.0] - 2026-07-29
 
 ### 架构主题

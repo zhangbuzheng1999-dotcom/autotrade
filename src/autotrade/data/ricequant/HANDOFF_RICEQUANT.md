@@ -24,6 +24,48 @@
 
 `API -> normalize -> persist -> DB_ONLY query`
 
+## 计算型期权 Greeks
+
+自定义 Black97 Greeks 与 RiceQuant 官方 `options.get_greeks` 分开维护：
+
+- 官方数据：`OptionGreeksService` / `option_greeks_*`
+- 本地计算：`CalculatedOptionGreeksService` /
+  `calculated_option_greeks_1d`
+
+调用示例：
+
+```python
+from autotrade.data.ricequant.base import FetchMode
+from autotrade.data.ricequant.service.calculated_options import (
+    CalculatedOptionGreeksService,
+)
+
+service = CalculatedOptionGreeksService()
+
+# 已落库结果可直接按合约查询。
+db_result = service.get(
+    mode=FetchMode.DB_ONLY,
+    order_book_ids=["AU2608C1000"],
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+)
+
+# 现场计算时会解析该合约所属品种，使用 SOURCE_ONLY 获取完整合约
+# 截面、期权价格和所需期货价格；完整截面落库后只返回请求合约。
+source_result = service.get(
+    mode=FetchMode.SOURCE_ONLY,
+    order_book_ids=["AU2608C1000"],
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+    persist=True,
+)
+```
+
+`SOURCE_ONLY` 的模式会传播到全部内部数据服务，不会混合 DB 数据。
+期货期权使用对应期货合约收盘价作为 Forward，ETF/指数期权使用同行权价
+Call/Put 平价构造 Forward。纯 Black97 计算位于
+`autotrade.analytics.options`，不负责数据库查询或合约拼接。
+
 ## 2. 当前架构总览
 
 模块采用四层结构：
