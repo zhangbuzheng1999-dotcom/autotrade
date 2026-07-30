@@ -1,7 +1,6 @@
 # 计算型期权分析数据
 
-本文说明 Autotrade v0.7.0 新增的计算型期权 Greeks 数据资源，以及后续
-IVX 资源的接口约定。
+本文说明 Autotrade v0.8.0 的计算型期权 Greeks 和 IVX 数据资源。
 
 ## 1. 设计目标
 
@@ -308,37 +307,122 @@ delta = 0.035962
 model_version = autotrade_v1
 ```
 
-## 9. IVX 状态与后续接口
+## 9. IVX 接口
 
-v0.7.0 尚未实现 IVX Service 和 ClickHouse 表。现有 IVX 算法仍位于
-cfutures 的 `opt_tools/cal_ivx.py`。
-
-计划新增：
+IVX 已作为独立日度资源实现：
 
 ```text
 CalculatedOptionIVXService
 rq_option_data.calculated_option_ivx_1d
 ```
 
-IVX 与 Greeks 复用完整品种截面和 SOURCE_ONLY 模式传播规则：
+IVX 是品种级指标，不能使用单个 `order_book_id` 现场计算。调用时必须传入
+`opt_symbol`，内部会获取该品种完整当日期权截面。
+
+### 9.1 使用方法
 
 ```python
-service.get(
+from autotrade.data.ricequant.base import FetchMode
+from autotrade.data.ricequant.service.calculated_options import (
+    CalculatedOptionIVXService,
+)
+
+service = CalculatedOptionIVXService()
+
+source_result = service.get(
     mode=FetchMode.SOURCE_ONLY,
     opt_symbol="AU",
     start_date="2026-07-10",
     end_date="2026-07-10",
     persist=True,
 )
+
+db_result = service.get(
+    mode=FetchMode.DB_ONLY,
+    opt_symbol="AU",
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+)
 ```
 
-IVX 的逻辑主键建议包含：
+`SOURCE_ONLY` 内部的 `OptionInstrumentService` 和 `OptionPriceService`
+同样强制使用 `SOURCE_ONLY, persist=False`。
+
+### 9.2 `opt_symbol` 如何解析期权集合
+
+当前实现先通过 RiceQuant 获取指定市场的全部 Option 合约信息，再使用
+`underlying_symbol` 匹配 `opt_symbol`：
 
 ```text
-date
-opt_symbol
-method
-model_version
+AU     -> underlying_symbol == "AU"
+510050 -> underlying_symbol == "510050" 或 "510050.XSHG"
+```
+
+随后保留与请求日期区间存在交集的合约：
+
+```text
+listed_date <= end_date
+maturity_date >= start_date
+```
+
+筛选得到完整的 `order_book_id` 集合后，再使用 `OptionPriceService` 一次性
+查询这些合约在日期区间内的收盘价。因此 IVX 的计算输入始终是对应品种的
+完整有效期权截面，而不是调用者指定的单张合约。
+
+### 9.3 计算口径
+
+- Call/Put 平价按到期日估计 Forward；
+- 排除剩余期限不超过 `min_days=7` 的月份；
+- 使用 OTM 期权价格积分计算每个到期月份的年化方差；
+- 默认将近月和次近月方差插值到 `target_days=30`；
+- IVX 使用波动率点表示，例如 `27.2` 表示 `27.2%`。
+
+如果最短有效到期月份已经不短于目标期限，则直接使用该到期月份的波动率，
+与原 `cfutures/opt_tools/cal_ivx.py` 口径保持一致。
+
+### 9.4 ClickHouse 字段
+
+| 字段 | 含义 |
+|---|---|
+| `date` | 交易日 |
+| `opt_symbol` | 期权品种 |
+| `ivx` | IVX，单位为波动率点 |
+| `target_days` | 目标期限，默认 30 天 |
+| `min_days` | 最短有效期限阈值，默认 7 天 |
+| `near_t_days` | 近月剩余天数 |
+| `next_t_days` | 次近月剩余天数 |
+| `near_variance` | 近月年化方差 |
+| `next_variance` | 次近月年化方差 |
+| `option_count` | 当日输入期权行数 |
+| `risk_free_rate` | 年化无风险利率 |
+| `method` | 默认 `model_free_variance` |
+| `price_type` | 当前为 `close` |
+| `frequency` | 当前为 `1d` |
+| `market` | 当前为 `cn` |
+| `model_version` | 算法版本 |
+| `ingest_time` | ClickHouse 写入版本时间 |
+
+纯计算入口：
+
+```python
+from autotrade.analytics.options import calculate_ivx
+```
+
+输入字段：
+
+```text
+date, option_price, t_days, strike_price, option_type, risk_free_rate
+```
+
+### 9.5 验证结果
+
+AU `2026-07-10` 使用 732 行完整期权截面完成
+`SOURCE_ONLY -> ClickHouse -> DB_ONLY`：
+
+```text
+near_t_days = 17
+next_t_days = 46
+ivx = 27.218222
 ```
 
 ## 10. 已知限制

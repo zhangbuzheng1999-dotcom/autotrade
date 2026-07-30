@@ -66,6 +66,26 @@ source_result = service.get(
 Call/Put 平价构造 Forward。纯 Black97 计算位于
 `autotrade.analytics.options`，不负责数据库查询或合约拼接。
 
+品种级 IVX 使用相同访问模式：
+
+```python
+from autotrade.data.ricequant.service.calculated_options import (
+    CalculatedOptionIVXService,
+)
+
+ivx_service = CalculatedOptionIVXService()
+ivx = ivx_service.get(
+    mode=FetchMode.SOURCE_ONLY,
+    opt_symbol="AU",
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+    persist=True,
+)
+```
+
+IVX 必须按 `opt_symbol` 现场计算，内部获取完整期权截面；落库表为
+`rq_option_data.calculated_option_ivx_1d`。
+
 ## 2. 当前架构总览
 
 模块采用四层结构：

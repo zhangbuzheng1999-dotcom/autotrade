@@ -3,14 +3,17 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from autotrade.analytics.options import calculate_black97_greeks
+from autotrade.analytics.options import calculate_black97_greeks, calculate_ivx
 from autotrade.data.ricequant.base import FetchMode, FetchStatus
 from autotrade.data.ricequant.service.futures import FuturePriceService
 from autotrade.data.ricequant.service.options import (
     OptionInstrumentService,
     OptionPriceService,
 )
-from autotrade.data.ricequant.spec.calculated_options import CalculatedOptionGreeksSpec
+from autotrade.data.ricequant.spec.calculated_options import (
+    CalculatedOptionGreeksSpec,
+    CalculatedOptionIVXSpec,
+)
 
 
 def _successful_data(result, resource: str) -> pd.DataFrame:
@@ -223,3 +226,118 @@ class CalculatedOptionGreeksDataSource:
         result = result.merge(forward, on=["date", "t_days"], how="left")
         result["forward_method"] = "put_call_parity"
         return result
+
+
+class CalculatedOptionIVXDataSource:
+    """Calculate one daily IVX value from a complete option-symbol panel."""
+
+    def __init__(
+        self,
+        spec: CalculatedOptionIVXSpec | None = None,
+        *,
+        option_instrument_service=None,
+        option_price_service=None,
+    ):
+        self.spec = spec or CalculatedOptionIVXSpec()
+        self._option_instrument_service = option_instrument_service
+        self._option_price_service = option_price_service
+
+    @property
+    def option_instrument_service(self):
+        if self._option_instrument_service is None:
+            self._option_instrument_service = OptionInstrumentService()
+        return self._option_instrument_service
+
+    @property
+    def option_price_service(self):
+        if self._option_price_service is None:
+            self._option_price_service = OptionPriceService()
+        return self._option_price_service
+
+    def fetch(self, **filters) -> pd.DataFrame:
+        filters = self.spec.fill_default_filters(
+            self.spec.normalize_query_filters(
+                {key: value for key, value in filters.items() if value is not None}
+            )
+        )
+        self.spec.validate_filters(filters, FetchMode.SOURCE_ONLY)
+
+        instruments = _successful_data(
+            self.option_instrument_service.get(
+                mode=FetchMode.SOURCE_ONLY,
+                persist=False,
+                market=filters["market"],
+            ),
+            "option instruments",
+        )
+        instruments = self._resolve_symbol_universe(instruments, filters)
+        if instruments.empty:
+            return self.spec.normalize_df(pd.DataFrame(), filters)
+
+        option_ids = instruments["order_book_id"].astype(str).unique().tolist()
+        prices = _successful_data(
+            self.option_price_service.get(
+                mode=FetchMode.SOURCE_ONLY,
+                persist=False,
+                order_book_ids=option_ids,
+                start_date=filters["start_date"],
+                end_date=filters["end_date"],
+                frequency=filters["frequency"],
+                fields=["close"],
+                market=filters["market"],
+            ),
+            "option prices",
+        )
+        if prices.empty:
+            return self.spec.normalize_df(pd.DataFrame(), filters)
+
+        panel = prices[["order_book_id", "date", filters["price_type"]]].merge(
+            instruments[
+                [
+                    "order_book_id", "maturity_date", "strike_price",
+                    "option_type",
+                ]
+            ],
+            on="order_book_id",
+            how="left",
+            validate="many_to_one",
+        )
+        panel["date"] = pd.to_datetime(panel["date"])
+        panel["maturity_date"] = pd.to_datetime(panel["maturity_date"])
+        panel["t_days"] = (panel["maturity_date"] - panel["date"]).dt.days
+        panel["option_price"] = pd.to_numeric(
+            panel[filters["price_type"]], errors="coerce"
+        )
+        panel["risk_free_rate"] = float(filters["risk_free_rate"])
+
+        result = calculate_ivx(
+            panel,
+            target_days=int(filters["target_days"]),
+            min_days=int(filters["min_days"]),
+        )
+        result["opt_symbol"] = str(filters["opt_symbol"])
+        result["target_days"] = int(filters["target_days"])
+        result["min_days"] = int(filters["min_days"])
+        result["risk_free_rate"] = float(filters["risk_free_rate"])
+        result["method"] = filters["method"]
+        result["price_type"] = filters["price_type"]
+        result["frequency"] = filters["frequency"]
+        result["market"] = filters["market"]
+        result["model_version"] = filters["model_version"]
+        return self.spec.normalize_df(result, filters)
+
+    @staticmethod
+    def _resolve_symbol_universe(
+        instruments: pd.DataFrame,
+        filters: dict,
+    ) -> pd.DataFrame:
+        symbol = str(filters["opt_symbol"])
+        values = instruments["underlying_symbol"].astype(str)
+        result = instruments[
+            values.eq(symbol) | values.str.split(".").str[0].eq(symbol)
+        ].copy()
+        start = pd.to_datetime(filters["start_date"])
+        end = pd.to_datetime(filters["end_date"])
+        listed = pd.to_datetime(result["listed_date"], errors="coerce")
+        maturity = pd.to_datetime(result["maturity_date"], errors="coerce")
+        return result[(listed <= end) & (maturity >= start)].copy()

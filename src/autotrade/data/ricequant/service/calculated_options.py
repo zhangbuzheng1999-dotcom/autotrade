@@ -8,12 +8,15 @@ from autotrade.data.ricequant.base import (
 )
 from autotrade.data.ricequant.datasource.calculated_options import (
     CalculatedOptionGreeksDataSource,
+    CalculatedOptionIVXDataSource,
 )
 from autotrade.data.ricequant.repository.calculated_options import (
     CalculatedOptionGreeksRepository,
+    CalculatedOptionIVXRepository,
 )
 from autotrade.data.ricequant.spec.calculated_options import (
     CalculatedOptionGreeksSpec,
+    CalculatedOptionIVXSpec,
 )
 
 
@@ -66,3 +69,21 @@ class CalculatedOptionGreeksService(BaseRQService):
                 result.data["order_book_id"].isin(requested_ids)
             ].reset_index(drop=True)
         return result
+
+
+class CalculatedOptionIVXService(BaseRQService):
+    """Query persisted IVX values or calculate them from a full source panel."""
+
+    def __init__(
+        self,
+        *,
+        spec: CalculatedOptionIVXSpec | None = None,
+        repo: CalculatedOptionIVXRepository | None = None,
+        source: CalculatedOptionIVXDataSource | None = None,
+    ):
+        spec = spec or CalculatedOptionIVXSpec()
+        super().__init__(
+            spec=spec,
+            repo=repo or CalculatedOptionIVXRepository(spec),
+            source=source or CalculatedOptionIVXDataSource(spec),
+        )

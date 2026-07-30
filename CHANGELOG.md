@@ -3,6 +3,33 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [0.8.0] - 2026-07-31
+
+### 新增
+
+- `autotrade.analytics.options.calculate_ivx()` 纯计算入口；
+- `CalculatedOptionIVXService`、DataSource、Repository 和 Spec；
+- ClickHouse 表 `rq_option_data.calculated_option_ivx_1d`；
+- 近月/次近月期限、方差及输入期权数量等诊断字段；
+- `tests/test_calculated_option_ivx.py`。
+
+### 数据访问约定
+
+- `DB_ONLY` 按 `opt_symbol` 和日期直接读取 ClickHouse；
+- `SOURCE_ONLY` 按 `opt_symbol` 获取完整期权截面并现场计算；
+- `opt_symbol` 同时匹配 `underlying_symbol` 原值及去除交易所后缀后的值，
+  再按上市日和到期日筛选查询区间内的有效合约；
+- 内部合约信息和期权价格均使用 `SOURCE_ONLY, persist=False`；
+- IVX 是品种级指标，不支持按单个 `order_book_id` 现场计算。
+
+### 计算与验证
+
+- Call/Put 平价构造各到期月份 Forward；
+- OTM 期权积分计算模型无关方差，默认插值到 30 天；
+- AU `2026-07-10` 使用 732 行完整期权截面得到
+  `ivx=27.218222`；
+- 已完成 `SOURCE_ONLY -> ClickHouse -> DB_ONLY` 真实闭环。
+
 ## [0.7.0] - 2026-07-30
 
 ### 架构主题

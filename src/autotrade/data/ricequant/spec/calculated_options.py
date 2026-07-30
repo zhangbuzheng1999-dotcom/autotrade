@@ -100,3 +100,84 @@ class CalculatedOptionGreeksSpec(BaseRQSpec):
 
     def split_filters(self, filters):
         return dict(filters), dict(filters)
+
+
+class CalculatedOptionIVXSpec(BaseRQSpec):
+    RESOURCE_NAME = "calculated_option_ivx"
+    RESOURCE_TYPE = "timeseries"
+    STORAGE_BACKEND = "clickhouse"
+    WRITE_MODE = "timeseries_append"
+    DATABASE = "rq_option_data"
+    TABLE = "calculated_option_ivx_1d"
+
+    API_PARAMS = {
+        "opt_symbol", "start_date", "end_date", "frequency", "market",
+        "risk_free_rate", "price_type", "target_days", "min_days", "method",
+        "model_version",
+    }
+    DB_QUERY_FIELDS = API_PARAMS | {"date"}
+    API_REQUIRED_FILTERS = {"opt_symbol", "start_date", "end_date"}
+    DB_REQUIRED_FILTERS = set()
+    DEFAULT_FILTERS = {
+        "frequency": "1d",
+        "market": "cn",
+        "risk_free_rate": 0.03,
+        "price_type": "close",
+        "target_days": 30,
+        "min_days": 7,
+        "method": "model_free_variance",
+        "model_version": "autotrade_v1",
+    }
+    COLUMNS = [
+        "date", "opt_symbol", "ivx", "target_days", "min_days",
+        "near_t_days", "next_t_days", "near_variance", "next_variance",
+        "option_count", "risk_free_rate", "method", "price_type", "frequency",
+        "market", "model_version",
+    ]
+
+    def validate_filters(self, filters: dict[str, Any], mode: FetchMode) -> None:
+        super().validate_filters(filters, mode)
+        if filters.get("frequency") != "1d":
+            raise ValueError("calculated_option_ivx currently supports frequency='1d' only")
+        if filters.get("price_type") != "close":
+            raise ValueError("calculated_option_ivx currently supports price_type='close' only")
+        if filters.get("method") != "model_free_variance":
+            raise ValueError(
+                "calculated_option_ivx currently supports method='model_free_variance' only"
+            )
+        if int(filters["target_days"]) <= 0 or int(filters["min_days"]) < 0:
+            raise ValueError("target_days must be positive and min_days must be non-negative")
+
+    def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            "opt_symbol": {"column": "opt_symbol", "op": "eq"},
+            "start_date": {"column": "date", "op": "gte"},
+            "end_date": {"column": "date", "op": "lte"},
+            "date": {"column": "date", "op": "eq"},
+            "frequency": {"column": "frequency", "op": "eq"},
+            "market": {"column": "market", "op": "eq"},
+            "price_type": {"column": "price_type", "op": "eq"},
+            "target_days": {"column": "target_days", "op": "eq"},
+            "min_days": {"column": "min_days", "op": "eq"},
+            "risk_free_rate": {"column": "risk_free_rate", "op": "eq"},
+            "method": {"column": "method", "op": "eq"},
+            "model_version": {"column": "model_version", "op": "eq"},
+        }
+
+    def normalize_db_query_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+        result = dict(filters)
+        for key in ("start_date", "end_date", "date"):
+            if key in result:
+                result[key] = pd.to_datetime(result[key]).date()
+        return result
+
+    def normalize_df(self, df: pd.DataFrame, filters=None) -> pd.DataFrame:
+        result = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+        for column in self.COLUMNS:
+            if column not in result:
+                result[column] = None
+        result["date"] = pd.to_datetime(result["date"], errors="coerce").dt.date
+        return result[self.COLUMNS]
+
+    def split_filters(self, filters):
+        return dict(filters), dict(filters)

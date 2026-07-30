@@ -800,6 +800,47 @@ def create_calculated_option_greeks_tables(
     )
 
 
+def build_calculated_option_ivx_daily_table_sql(
+    table_name: str = "calculated_option_ivx_1d",
+) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{table_name}` (
+        `date` Date,
+        `opt_symbol` String,
+        `ivx` Nullable(Float64),
+        `target_days` UInt16,
+        `min_days` UInt16,
+        `near_t_days` Nullable(UInt16),
+        `next_t_days` Nullable(UInt16),
+        `near_variance` Nullable(Float64),
+        `next_variance` Nullable(Float64),
+        `option_count` UInt32,
+        `risk_free_rate` Float64,
+        `method` String,
+        `price_type` String,
+        `frequency` String,
+        `market` String,
+        `model_version` String,
+        `ingest_time` DateTime64(3) DEFAULT now64(3)
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`date`)
+    ORDER BY (
+        `date`, `opt_symbol`, `target_days`, `min_days`, `risk_free_rate`, `method`,
+        `model_version`
+    )
+    """
+
+
+def create_calculated_option_ivx_tables(
+    database_name: str = "rq_option_data",
+) -> None:
+    execute_clickhouse_sql(
+        build_calculated_option_ivx_daily_table_sql(),
+        database=database_name,
+    )
+
+
 def create_option_specific_tables(database_name: str = "rq_option_data") -> None:
     execute_sql(build_option_instruments_table_sql(), database=database_name)
 
@@ -816,6 +857,7 @@ def create_rq_options_data(database_name: str = "rq_option_data") -> None:
     # 高频 / 时序 price 表走 ClickHouse
     create_option_price_tables(database_name=database_name)
     create_calculated_option_greeks_tables(database_name=database_name)
+    create_calculated_option_ivx_tables(database_name=database_name)
 
     create_option_greeks_tables(database_name=database_name)
 
