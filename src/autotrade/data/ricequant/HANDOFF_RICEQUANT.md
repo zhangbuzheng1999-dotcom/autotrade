@@ -62,8 +62,9 @@ source_result = service.get(
 ```
 
 `SOURCE_ONLY` 的模式会传播到全部内部数据服务，不会混合 DB 数据。
-期货期权使用对应期货合约收盘价作为 Forward，ETF/指数期权使用同行权价
-Call/Put 平价构造 Forward。纯 Black97 计算位于
+期货期权使用对应期货合约收盘价作为 Forward；ETF/指数期权直接使用复制自
+cfutures 的 Forward 引擎，以 Call/Put 成交量加权构造 Forward，并保留
+期限插值和 Spot 兜底。纯 Black97 计算位于
 `autotrade.analytics.options`，不负责数据库查询或合约拼接。
 
 品种级 IVX 使用相同访问模式：

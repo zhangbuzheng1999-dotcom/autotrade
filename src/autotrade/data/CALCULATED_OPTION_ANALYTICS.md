@@ -1,6 +1,9 @@
 # 计算型期权分析数据
 
-本文说明 Autotrade v0.8.0 的计算型期权 Greeks 和 IVX 数据资源。
+本文说明 Autotrade v0.9.0 的计算型期权 Greeks 和 IVX 数据资源。
+
+v0.9.0 起，Forward、Greeks 和 IVX 的算法实现直接复用从 cfutures
+复制的模块，目标是与历史 `row_data/opt_panel` 和 `ivx_data` 逐值一致。
 
 ## 1. 设计目标
 
@@ -32,7 +35,9 @@ RiceQuant，也不处理策略字段映射。`autotrade.data.ricequant` 负责�
 ```text
 autotrade/
 ├── analytics/options/
-│   └── greeks.py
+│   ├── opt_forward_curve.py
+│   ├── cal_opt_greek.py
+│   └── cal_ivx.py
 └── data/ricequant/
     ├── datasource/calculated_options.py
     ├── repository/calculated_options.py
@@ -49,12 +54,12 @@ rq_option_data.calculated_option_greeks_1d
 当前版本只支持日频 `frequency="1d"` 和收盘价
 `price_type="close"`。
 
-## 3. Black97 最小输入
+## 3. Black97 输入
 
-纯计算函数：
+直接使用复制自 cfutures 的函数：
 
 ```python
-from autotrade.analytics.options import calculate_black97_greeks
+from autotrade.analytics.options import calculate_option_greeks_for_dates
 ```
 
 输入 DataFrame 必须包含：
@@ -62,21 +67,21 @@ from autotrade.analytics.options import calculate_black97_greeks
 ```text
 order_book_id
 date
-option_price
+close
 forward_price
 strike_price
-t_days
-risk_free_rate
+T_days
+r
 option_type
 ```
 
 其中：
 
-- `option_price`：期权市场价格；
+- `close`：期权市场价格；
 - `forward_price`：期权对应的 Forward；
 - `strike_price`：行权价；
-- `t_days`：剩余日历天数；
-- `risk_free_rate`：小数形式的年化无风险利率；
+- `T_days`：剩余日历天数；
+- `r`：小数形式的年化无风险利率；
 - `option_type`：`C` 或 `P`。
 
 输出在原始输入后增加：
@@ -123,11 +128,16 @@ ETF、指数期权按交易日、剩余期限和行权价配对 Call/Put：
 F = K + exp(rT) × (CallPrice - PutPrice)
 ```
 
-同一交易日、同一剩余期限存在多组配对时，使用候选 Forward 的中位数：
+同一交易日、同一剩余期限存在多组配对时，与 cfutures 一致：
 
 ```text
-forward_method = "put_call_parity"
+pair_weight = (call_volume + put_volume) / 2
+forward_price = weighted_mean(forward_candidate, pair_weight)
+forward_method = "cfutures_implied_weighted_mean"
 ```
+
+缺少有效平价组合时使用标的现货 Carry 兜底；缺失期限使用 log-linear
+插值，曲线边缘使用平端外推。
 
 ## 5. Service 使用方法
 
@@ -250,12 +260,12 @@ CalculatedOptionGreeksService SOURCE_ONLY
 | `vanna` | Vanna |
 | `vomma` | Vomma |
 | `charm` | Charm |
-| `forward_method` | `future_close` 或 `put_call_parity` |
+| `forward_method` | `future_close` 或 `cfutures_implied_weighted_mean` |
 | `price_type` | 当前为 `close` |
 | `frequency` | 当前为 `1d` |
 | `market` | 当前为 `cn` |
 | `model_id` | 当前默认 `black97` |
-| `model_version` | 当前默认 `autotrade_v1` |
+| `model_version` | 当前默认 `cfutures_v1` |
 | `ingest_time` | ClickHouse 写入版本时间 |
 
 表使用：
@@ -295,7 +305,7 @@ create_calculated_option_greeks_tables()
   - `DB_ONLY` 成功返回请求合约。
 - 510050 `2026-07-10`：
   - `SOURCE_ONLY` 计算 96 行；
-  - 使用 `put_call_parity` Forward。
+  - v0.9.0 起使用 cfutures volume-weighted Forward。
 
 示例 AU 合约：
 
@@ -304,7 +314,7 @@ order_book_id = AU2608C1000
 forward_price = 897.94
 iv = 0.272818
 delta = 0.035962
-model_version = autotrade_v1
+model_version = cfutures_v1
 ```
 
 ## 9. IVX 接口
@@ -374,9 +384,10 @@ maturity_date >= start_date
 - Call/Put 平价按到期日估计 Forward；
 - 排除剩余期限不超过 `min_days=7` 的月份；
 - 使用 OTM 期权价格积分计算每个到期月份的年化方差；
-- 默认将近月和次近月方差插值到 `target_days=30`；
+- 将近月和次近月方差插值到固定的 `target_days=30`；
 - IVX 使用波动率点表示，例如 `27.2` 表示 `27.2%`。
 
+为与 cfutures 完全一致，`target_days` 固定为 30，`min_days` 固定为 7。
 如果最短有效到期月份已经不短于目标期限，则直接使用该到期月份的波动率，
 与原 `cfutures/opt_tools/cal_ivx.py` 口径保持一致。
 
@@ -389,10 +400,10 @@ maturity_date >= start_date
 | `ivx` | IVX，单位为波动率点 |
 | `target_days` | 目标期限，默认 30 天 |
 | `min_days` | 最短有效期限阈值，默认 7 天 |
-| `near_t_days` | 近月剩余天数 |
-| `next_t_days` | 次近月剩余天数 |
-| `near_variance` | 近月年化方差 |
-| `next_variance` | 次近月年化方差 |
+| `near_t_days` | cfutures 原函数不返回，当前为 NULL |
+| `next_t_days` | cfutures 原函数不返回，当前为 NULL |
+| `near_variance` | cfutures 原函数不返回，当前为 NULL |
+| `next_variance` | cfutures 原函数不返回，当前为 NULL |
 | `option_count` | 当日输入期权行数 |
 | `risk_free_rate` | 年化无风险利率 |
 | `method` | 默认 `model_free_variance` |
@@ -405,13 +416,13 @@ maturity_date >= start_date
 纯计算入口：
 
 ```python
-from autotrade.analytics.options import calculate_ivx
+from autotrade.analytics.options import cal_ivx
 ```
 
 输入字段：
 
 ```text
-date, option_price, t_days, strike_price, option_type, risk_free_rate
+date, price, T_days, K, flag, r
 ```
 
 ### 9.5 验证结果
@@ -420,10 +431,10 @@ AU `2026-07-10` 使用 732 行完整期权截面完成
 `SOURCE_ONLY -> ClickHouse -> DB_ONLY`：
 
 ```text
-near_t_days = 17
-next_t_days = 46
-ivx = 27.218222
+ivx = 27.239487230465492
 ```
+
+该结果与历史 `row_data/ivx_data/AU.pkl` 完全一致。
 
 ## 10. 已知限制
 

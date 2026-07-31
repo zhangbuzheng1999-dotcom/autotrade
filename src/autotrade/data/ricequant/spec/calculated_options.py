@@ -31,7 +31,7 @@ class CalculatedOptionGreeksSpec(BaseRQSpec):
         "risk_free_rate": 0.03,
         "price_type": "close",
         "model_id": "black97",
-        "model_version": "autotrade_v1",
+        "model_version": "cfutures_v1",
     }
     COLUMNS = [
         "order_book_id", "date", "opt_symbol", "underlying_order_book_id",
@@ -126,7 +126,7 @@ class CalculatedOptionIVXSpec(BaseRQSpec):
         "target_days": 30,
         "min_days": 7,
         "method": "model_free_variance",
-        "model_version": "autotrade_v1",
+        "model_version": "cfutures_v1",
     }
     COLUMNS = [
         "date", "opt_symbol", "ivx", "target_days", "min_days",
@@ -147,6 +147,10 @@ class CalculatedOptionIVXSpec(BaseRQSpec):
             )
         if int(filters["target_days"]) <= 0 or int(filters["min_days"]) < 0:
             raise ValueError("target_days must be positive and min_days must be non-negative")
+        if int(filters["target_days"]) != 30 or int(filters["min_days"]) != 7:
+            raise ValueError(
+                "cfutures-compatible IVX requires target_days=30 and min_days=7"
+            )
 
     def resolve_db_filter_specs(self, filters: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return {

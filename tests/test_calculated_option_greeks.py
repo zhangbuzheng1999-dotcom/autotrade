@@ -41,15 +41,25 @@ def test_source_only_propagates_to_all_input_services():
             "order_book_id": ["OPT-C", "OPT-P"],
             "date": ["2025-01-02", "2025-01-02"],
             "close": [5.0, 4.0],
+            "volume": [10.0, 10.0],
+        }
+    )
+    underlying_prices = pd.DataFrame(
+        {
+            "order_book_id": ["510050.XSHG"],
+            "date": ["2025-01-02"],
+            "close": [100.0],
         }
     )
     instrument_service = RecordingService(instruments)
     price_service = RecordingService(prices)
     future_service = RecordingService(pd.DataFrame())
+    underlying_service = RecordingService(underlying_prices)
     source = CalculatedOptionGreeksDataSource(
         option_instrument_service=instrument_service,
         option_price_service=price_service,
         future_price_service=future_service,
+        underlying_price_service=underlying_service,
     )
 
     result = source.fetch(
@@ -59,11 +69,13 @@ def test_source_only_propagates_to_all_input_services():
     )
 
     assert len(result) == 2
-    assert result["forward_method"].eq("put_call_parity").all()
+    assert result["forward_method"].eq("cfutures_implied_weighted_mean").all()
     assert result["forward_price"].notna().all()
     assert instrument_service.calls[0]["mode"] is FetchMode.SOURCE_ONLY
     assert price_service.calls[0]["mode"] is FetchMode.SOURCE_ONLY
     assert future_service.calls == []
+    assert underlying_service.calls[0]["mode"] is FetchMode.SOURCE_ONLY
+    assert underlying_service.calls[0]["persist"] is False
 
 
 class CapturingRepository:

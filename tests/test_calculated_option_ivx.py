@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from autotrade.analytics.options import calculate_ivx
+from autotrade.analytics.options import cal_ivx
 from autotrade.data.ricequant.base import FetchMode, FetchResult, FetchStatus
 from autotrade.data.ricequant.datasource.calculated_options import (
     CalculatedOptionIVXDataSource,
@@ -42,14 +42,16 @@ def _option_panel():
     return pd.DataFrame(rows)
 
 
-def test_calculate_ivx_returns_daily_value_and_diagnostics():
-    result = calculate_ivx(_option_panel())
+def test_cfutures_cal_ivx_returns_daily_value():
+    panel = _option_panel()
+    panel.columns = [
+        "date", "price", "T_days", "K", "flag", "r",
+    ]
+    result = cal_ivx(panel, n_jobs=1, show_progress=False)
 
     assert len(result) == 1
-    assert np.isfinite(result.loc[0, "ivx"])
-    assert result.loc[0, "near_t_days"] == 20
-    assert result.loc[0, "next_t_days"] == 50
-    assert result.loc[0, "option_count"] == 12
+    assert pd.to_datetime(result.index[0]) == pd.Timestamp("2025-01-02")
+    assert np.isfinite(result.iloc[0])
 
 
 def test_ivx_source_only_propagates_to_input_services():

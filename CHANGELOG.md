@@ -3,6 +3,42 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [0.9.0] - 2026-07-31
+
+### cfutures 算法完全兼容
+
+- 将 cfutures 的 `opt_forward_curve.py` 和 `cal_opt_greek.py` 原样复制到
+  `autotrade.analytics.options`；
+- 将实际生成历史 `ivx_data` 的 `cal_ivx.py` 复制到同一目录，仅修改包内
+  相对导入；
+- 删除旧 `greeks.py`、`ivx.py` 和中间 `cfutures/` 子目录；
+- DataSource 直接调用三个 cfutures 模块。
+
+### Forward
+
+- 期货期权继续使用实际对应期货合约收盘价；
+- ETF/指数期权恢复 cfutures 的 Call/Put 平价 Forward；
+- 使用 Call/Put 成交量均值作为权重并进行 `weighted_mean` 聚合；
+- 恢复 Spot Carry 兜底、期限 log-linear 插值和平端外推；
+- 非期货标的价格也严格使用 `SOURCE_ONLY, persist=False` 获取。
+
+### IVX
+
+- 使用 cfutures 的等权 Forward 候选均值；
+- 恢复缺失期限插值和平端外推；
+- 为保持完全一致，固定 `target_days=30`、`min_days=7`；
+- cfutures 原函数不返回期限诊断，因此 `near_t_days`、
+  `next_t_days`、`near_variance` 和 `next_variance` 保留为 NULL。
+
+### 版本与验证
+
+- Greeks 和 IVX 默认 `model_version` 升级为 `cfutures_v1`；
+- ClickHouse 中旧 `autotrade_v1` 计算结果已删除；
+- 2026-07-10 的 AU、HO、IO、MO 真实 SOURCE_ONLY 验证：
+  - 合约集合和 Forward 完全一致；
+  - 全部 Greeks 和 NULL 位置一致；
+  - 四个 IVX 与历史 PKL 差值均为 0。
+
 ## [0.8.0] - 2026-07-31
 
 ### 新增
