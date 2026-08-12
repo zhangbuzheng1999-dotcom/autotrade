@@ -1,6 +1,6 @@
 # 计算型期权分析数据
 
-本文说明 Autotrade v0.9.0 的计算型期权 Greeks 和 IVX 数据资源。
+本文说明 Autotrade v0.10.0 的计算型期权 Greeks 和 IVX 数据资源。
 
 v0.9.0 起，Forward、Greeks 和 IVX 的算法实现直接复用从 cfutures
 复制的模块，目标是与历史 `row_data/opt_panel` 和 `ivx_data` 逐值一致。
@@ -21,7 +21,7 @@ service.get(mode=FetchMode.DB_THEN_SOURCE, ...)
 - `CalculatedOptionGreeksService`：Autotrade 使用 Black97 现场计算的
   IV、Greeks 和高阶 Greeks。
 
-纯计算逻辑位于 `autotrade.analytics.options`，不访问数据库、不调用
+纯计算逻辑位于 `autotrade.option.analytics`，不访问数据库、不调用
 RiceQuant，也不处理策略字段映射。`autotrade.data.ricequant` 负责：
 
 - 获取计算所需的完整期权截面；
@@ -34,10 +34,10 @@ RiceQuant，也不处理策略字段映射。`autotrade.data.ricequant` 负责�
 
 ```text
 autotrade/
-├── analytics/options/
-│   ├── opt_forward_curve.py
-│   ├── cal_opt_greek.py
-│   └── cal_ivx.py
+├── option/analytics/
+│   ├── forward_curve.py
+│   ├── greeks.py
+│   └── ivx.py
 └── data/ricequant/
     ├── datasource/calculated_options.py
     ├── repository/calculated_options.py
@@ -59,7 +59,7 @@ rq_option_data.calculated_option_greeks_1d
 直接使用复制自 cfutures 的函数：
 
 ```python
-from autotrade.analytics.options import calculate_option_greeks_for_dates
+from autotrade.option.analytics import calculate_option_greeks_for_dates
 ```
 
 输入 DataFrame 必须包含：
@@ -109,35 +109,24 @@ charm
 
 ## 4. Forward 构造
 
-### 4.1 期货期权
-
-期货期权使用每张期权实际对应的期货合约收盘价：
-
-```text
-forward_price = underlying future close
-forward_method = "future_close"
-```
-
-例如 AU 期权对应 AU 月份期货合约，而不是使用 `AU888` 计算 Greeks。
-
-### 4.2 ETF 和指数期权
-
-ETF、指数期权按交易日、剩余期限和行权价配对 Call/Put：
+v0.10.0 起不再区分期货、ETF或指数期权。所有期权都按交易日、剩余期限和
+行权价配对 Call/Put：
 
 ```text
 F = K + exp(rT) × (CallPrice - PutPrice)
 ```
 
-同一交易日、同一剩余期限存在多组配对时，与 cfutures 一致：
+同一交易日、同一剩余期限存在多组配对时：
 
 ```text
 pair_weight = (call_volume + put_volume) / 2
 forward_price = weighted_mean(forward_candidate, pair_weight)
-forward_method = "cfutures_implied_weighted_mean"
+forward_method = "put_call_parity_weighted_mean"
 ```
 
-缺少有效平价组合时使用标的现货 Carry 兜底；缺失期限使用 log-linear
-插值，曲线边缘使用平端外推。
+缺失期限可以使用同一交易日其他有效平价期限进行 log-linear 插值，曲线
+边缘使用平端外推。禁止使用期货收盘价或 Spot Carry 兜底；如果当日没有
+任何有效 Call/Put 平价锚点，Forward 和对应 Greeks 保持 NULL。
 
 ## 5. Service 使用方法
 
@@ -191,6 +180,30 @@ result = service.get(
 )
 ```
 
+`mode` 控制 Greeks 本身的获取方式。现场计算时，可用 `input_mode`
+单独控制计算所需的期权合约信息和行情数据来源：
+
+```python
+# 读取 ClickHouse/MySQL 中已有的 instruments 和 price，在本地计算 Greeks
+result = service.get(
+    mode=FetchMode.SOURCE_ONLY,
+    input_mode=FetchMode.DB_ONLY,
+    opt_symbol="AU",
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+    persist=False,
+)
+```
+
+`input_mode` 只接受 `FetchMode.DB_ONLY` 和 `FetchMode.SOURCE_ONLY`：
+
+- 不传时默认为 `FetchMode.SOURCE_ONLY`，保持原有行为；
+- `DB_ONLY`：合约信息和期权行情均从本地数据库读取，再现场计算；
+- `SOURCE_ONLY`：合约信息和期权行情均从 RiceQuant 源读取，再现场计算。
+
+两个底层服务始终使用同一个 `input_mode`，不会混用数据库合约信息和源行情。
+`strike_price` 优先采用行情数据中的值；行情源未提供该字段时，才回退到合约信息。
+
 它会计算并返回完整 AU 期权截面。
 
 ### 5.3 SOURCE_ONLY 按合约请求
@@ -212,27 +225,65 @@ result = service.get(
     → SOURCE_ONLY 获取期权合约信息
     → 解析所属 opt_symbol
     → SOURCE_ONLY 获取该品种完整期权截面
-    → SOURCE_ONLY 获取所需期货价格
-    → 计算完整截面
+    → Call/Put 利率平价构造 Forward
+    → 计算完整 Greeks 截面
     → 完整截面写入 ClickHouse
     → 最后按请求 order_book_ids 裁剪返回
 ```
 
 即使调用者只请求一张期权，持久化的仍然是计算所需的完整品种截面。
 
-### 5.4 SOURCE_ONLY 模式传播
+### 5.4 现场计算与输入数据源分层
 
-外层使用 `SOURCE_ONLY` 时，内部服务也必须使用 `SOURCE_ONLY`：
+外层 `mode` 与底层 `input_mode` 是两个独立层次：
 
 ```text
-CalculatedOptionGreeksService SOURCE_ONLY
-├── OptionInstrumentService SOURCE_ONLY
-├── OptionPriceService SOURCE_ONLY
-└── FuturePriceService SOURCE_ONLY（期货期权需要时）
+mode
+├── DB_ONLY：直接读取 calculated_option_greeks_1d
+└── SOURCE_ONLY：现场计算 Greeks
+    └── input_mode
+        ├── DB_ONLY：MySQL instruments + ClickHouse option price
+        └── SOURCE_ONLY：RiceQuant instruments + RiceQuant option price
 ```
+
+`input_mode` 不接受 `DB_THEN_SOURCE`，避免一次计算中的底层数据来源随数据库
+命中情况变化。合约信息和行情始终使用同一个 `input_mode`。
+
+分钟 Greeks 使用相同的现场计算语义，并把 `frequency` 与闭区间
+`time_slice` 原样传递给期权行情服务：
+
+```python
+result = service.get(
+    mode=FetchMode.SOURCE_ONLY,
+    input_mode=FetchMode.SOURCE_ONLY,
+    persist=False,
+    opt_symbol="AU",
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+    frequency="1m",
+    time_slice=("11:00", "11:30"),
+)
+```
+
+每个 `datetime` 独立构造完整 Call/Put 截面的成交量加权 Forward，并以
+`order_book_id + datetime` 为唯一计算键。分钟结果存储在
+`rq_option_data.calculated_option_greeks_1m`，同时保留 `trading_date` 处理夜盘。
 
 内部输入查询统一使用 `persist=False`，避免现场计算过程中顺带修改基础行情
 和基础信息表。计算结果是否写入由外层 `persist` 控制。
+
+### 5.5 Strike Price 来源
+
+现场计算使用的 `strike_price` 按以下优先级解析：
+
+1. 优先使用 `OptionPriceService` 行情数据中的 `strike_price`；
+2. 行情源没有该列或该行为空时，回退到 `OptionInstrumentService` 合约信息；
+3. `input_mode=DB_ONLY` 时，正常情况下即使用 ClickHouse 期权行情表的
+   `strike_price`。
+
+合并前只保留计算所需的行情列，避免 ClickHouse 完整行中的
+`strike_price`、`contract_multiplier` 等字段与合约快照产生 `_x`、`_y`
+后缀，保证 DB 和 RiceQuant 两条输入路径形成相同的计算 schema。
 
 ## 6. ClickHouse 字段说明
 
@@ -260,12 +311,12 @@ CalculatedOptionGreeksService SOURCE_ONLY
 | `vanna` | Vanna |
 | `vomma` | Vomma |
 | `charm` | Charm |
-| `forward_method` | `future_close` 或 `cfutures_implied_weighted_mean` |
+| `forward_method` | `put_call_parity_weighted_mean` |
 | `price_type` | 当前为 `close` |
 | `frequency` | 当前为 `1d` |
 | `market` | 当前为 `cn` |
 | `model_id` | 当前默认 `black97` |
-| `model_version` | 当前默认 `cfutures_v1` |
+| `model_version` | Greeks 当前默认 `parity_v1` |
 | `ingest_time` | ClickHouse 写入版本时间 |
 
 表使用：
@@ -296,25 +347,46 @@ create_calculated_option_greeks_tables()
 
 ## 8. 当前验证
 
-已完成真实端到端验证：
+v0.10.0 已完成真实 SOURCE_ONLY 验证：
 
 - AU `2026-07-10`：
   - `SOURCE_ONLY` 计算 732 行；
-  - 使用 `future_close` Forward；
-  - 请求单合约时完整 732 行先落库；
-  - `DB_ONLY` 成功返回请求合约。
-- 510050 `2026-07-10`：
-  - `SOURCE_ONLY` 计算 96 行；
-  - v0.9.0 起使用 cfutures volume-weighted Forward。
+  - 732 行 Forward 全部由 Call/Put 平价得到；
+  - 680 行成功反解 IV。
+- HO `2026-07-10`：
+  - `SOURCE_ONLY` 计算 172 行；
+  - 172 行 Forward 全部由 Call/Put 平价得到；
+  - 162 行成功反解 IV。
+
+同时完成 AU `2026-07-10` 的数据库输入现场计算验证：
+
+```python
+service.get(
+    mode=FetchMode.SOURCE_ONLY,
+    input_mode=FetchMode.DB_ONLY,
+    persist=False,
+    opt_symbol="AU",
+    start_date="2026-07-10",
+    end_date="2026-07-10",
+)
+```
+
+验证结果：
+
+```text
+status = success
+rows = 732
+forward_price non-null = 732
+iv non-null = 680
+ClickHouse strike_price exact match = 732 / 732
+strike_price null mismatch = 0
+```
 
 示例 AU 合约：
 
 ```text
-order_book_id = AU2608C1000
-forward_price = 897.94
-iv = 0.272818
-delta = 0.035962
-model_version = cfutures_v1
+forward_method = put_call_parity_weighted_mean
+model_version = parity_v1
 ```
 
 ## 9. IVX 接口
@@ -416,7 +488,7 @@ maturity_date >= start_date
 纯计算入口：
 
 ```python
-from autotrade.analytics.options import cal_ivx
+from autotrade.option.analytics import cal_ivx
 ```
 
 输入字段：
@@ -436,9 +508,24 @@ ivx = 27.239487230465492
 
 该结果与历史 `row_data/ivx_data/AU.pkl` 完全一致。
 
-## 10. 已知限制
+## 10. v0.10.0 变更记录
 
-- 当前只支持日频和收盘价；
+2026-08-02：
+
+- Greeks 接口新增 `input_mode`，不修改公共 `FetchMode`，也不影响其他数据接口；
+- `mode=SOURCE_ONLY, input_mode=DB_ONLY` 支持利用本地数据库输入现场计算；
+- `mode=SOURCE_ONLY, input_mode=SOURCE_ONLY` 保留原有全 RiceQuant 输入行为；
+- `input_mode` 默认值为 `SOURCE_ONLY`，已有调用保持向后兼容；
+- 禁止 Greeks 的 `input_mode=DB_THEN_SOURCE`，确保同一次计算输入来源确定；
+- DB 输入链路使用宿主机 MySQL 合约信息和 ClickHouse 期权行情；
+- `strike_price` 改为行情优先、合约信息兜底，DB 输入时以 ClickHouse 为准；
+- 修复 ClickHouse 完整行情字段与 instruments 合并后产生重名后缀的问题；
+- 增加 SOURCE_ONLY 默认传播、DB_ONLY 输入传播和 Strike 优先级测试；
+- 使用 AU 2026-07-10 的 732 行真实数据完成端到端验证。
+
+## 11. 已知限制
+
+- Greeks 当前支持 `1d` 和 `1m`，价格类型仍只支持收盘价；
 - `DB_THEN_SOURCE` 仍使用基础框架的“数据库非空即返回”语义；
 - 尚未增加完整截面 coverage 表；
 - 计算失败的 IV/Greeks 使用 `NULL`，不会丢弃原始合约行；

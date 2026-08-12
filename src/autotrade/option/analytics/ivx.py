@@ -2,7 +2,7 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from .opt_forward_curve import build_implied_forward_curve
+from .forward_curve import build_implied_forward_curve
 from tqdm import tqdm
 import multiprocessing as mp
 import traceback

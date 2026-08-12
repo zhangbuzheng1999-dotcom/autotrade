@@ -51,7 +51,8 @@ db_result = service.get(
 )
 
 # 现场计算时会解析该合约所属品种，使用 SOURCE_ONLY 获取完整合约
-# 截面、期权价格和所需期货价格；完整截面落库后只返回请求合约。
+# 截面和期权价格；通过 Call/Put 平价构造 Forward，完整截面落库后
+# 只返回请求合约。
 source_result = service.get(
     mode=FetchMode.SOURCE_ONLY,
     order_book_ids=["AU2608C1000"],
@@ -62,10 +63,14 @@ source_result = service.get(
 ```
 
 `SOURCE_ONLY` 的模式会传播到全部内部数据服务，不会混合 DB 数据。
-期货期权使用对应期货合约收盘价作为 Forward；ETF/指数期权直接使用复制自
-cfutures 的 Forward 引擎，以 Call/Put 成交量加权构造 Forward，并保留
-期限插值和 Spot 兜底。纯 Black97 计算位于
-`autotrade.analytics.options`，不负责数据库查询或合约拼接。
+所有期权统一使用 Call/Put 利率平价和成交量加权构造 Forward，不再判断
+期货、ETF或指数，也不读取期货/标的价格。保留基于有效平价锚点的期限插值，
+但禁用期货收盘价和 Spot Carry 兜底。纯 Black97 计算位于
+`autotrade.option.analytics`，不负责数据库查询或合约拼接。
+
+计算型 Greeks 支持 `1d` 和 `1m`。分钟结果落库到
+`calculated_option_greeks_1m`，按 `datetime` 分区排序，并支持将闭区间
+`time_slice` 传播给底层期权分钟行情查询。
 
 品种级 IVX 使用相同访问模式：
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from autotrade.analytics.options import cal_ivx
+from autotrade.option.analytics import cal_ivx
 from autotrade.data.ricequant.base import FetchMode, FetchResult, FetchStatus
 from autotrade.data.ricequant.datasource.calculated_options import (
     CalculatedOptionIVXDataSource,

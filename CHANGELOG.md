@@ -3,6 +3,44 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [Unreleased]
+
+### Option 风险状态与模块收敛
+
+- 新增 `autotrade.option` 领域包，统一容纳期权 analytics、策略面板、
+  `GreekRiskManager` 和回测 PnL 分析器；删除旧
+  `autotrade.analytics.options` 与 `autotrade.strategy.option_strategy` 路径。
+- 新增 `GreekRiskState` / `GreekRiskManager`：不修改通用 `Security`，按
+  `instrument_id` 维护最新风险记录，并在读取时组合 `SecurityManager` 的最新
+  价格与 multiplier；支持单资产及 OMS 组合 Greek 暴露聚合。
+- 支持期权从 `Slice.option_analytics["option_analytics"]` 接收
+  `OptionAnalyticsData`，线性资产从
+  `Slice.custom_data["non_option_greek_risk"]` 接收同字段协议的
+  `CustomData.payload`。
+- 新增 `OptionBacktestAnalyzer`：冻结 Greek/价格/持仓快照，并以期初持仓与
+  Greeks 做 delta、gamma、vega、theta、rho、vanna、vomma、charm 区间归因；
+  非期权缺失 delta 时仅在归因中按线性 delta=1 回退，期权缺 delta 则标记归因
+  无效。
+- 新增 `frameworkguide.md`，记录运行时接线、输入协议、归因公式、缺失值语义和
+  实盘/回测职责边界；新增风险管理场景测试。
+
+## [0.10.0] - 2026-08-02
+
+### Forward 统一为利率平价
+
+- Calculated Greeks 不再判断期权标的是期货、ETF还是指数；
+- 删除通过合约代码是否包含 `.` 判断资产类型的逻辑；
+- 删除 Greeks 在线计算对 `FuturePriceService` 和标的价格 Service 的依赖；
+- 所有期权统一使用完整 Call/Put 截面，通过利率平价反推 Forward；
+- 保留成交量加权聚合和基于有效平价锚点的期限插值；
+- 禁用期货收盘价和 Spot Carry 兜底；没有任何有效平价锚点时 Forward/Greeks
+  保持 NULL。
+
+### 模型版本
+
+- Calculated Greeks 默认 `model_version` 更新为 `parity_v1`；
+- IVX 已经使用利率平价 Forward，继续使用 `cfutures_v1`。
+
 ## [0.9.0] - 2026-07-31
 
 ### cfutures 算法完全兼容

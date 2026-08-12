@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from autotrade.analytics.options.cal_ivx import cal_ivx
-from autotrade.analytics.options.cal_opt_greek import (
+from autotrade.option.analytics.ivx import cal_ivx
+from autotrade.option.analytics.greeks import (
     calculate_option_greeks_for_dates,
 )
-from autotrade.analytics.options.opt_forward_curve import (
+from autotrade.option.analytics.forward_curve import (
     build_forward_curves_by_date,
 )
 from autotrade.data.ricequant.base import FetchMode, FetchStatus
-from autotrade.data.ricequant.service.futures import FuturePriceService
-from autotrade.data.ricequant.service.index import IndexPriceService
 from autotrade.data.ricequant.service.options import (
     OptionInstrumentService,
     OptionPriceService,
@@ -24,12 +22,32 @@ from autotrade.data.ricequant.spec.calculated_options import (
 
 def _successful_data(result, resource: str) -> pd.DataFrame:
     if result.status != FetchStatus.SUCCESS:
-        raise RuntimeError(f"{resource} SOURCE_ONLY failed") from result.error
+        raise RuntimeError(f"{resource} fetch failed") from result.error
     return pd.DataFrame() if result.data is None else result.data.copy()
 
 
+def _normalize_input_mode(value) -> FetchMode:
+    """Normalize the storage/source choice for calculated-resource inputs."""
+    if value is None:
+        return FetchMode.SOURCE_ONLY
+    if isinstance(value, FetchMode):
+        mode = value
+    else:
+        try:
+            mode = FetchMode(str(value).lower())
+        except ValueError as exc:
+            raise ValueError(
+                "input_mode must be FetchMode.DB_ONLY or FetchMode.SOURCE_ONLY"
+            ) from exc
+    if mode not in {FetchMode.DB_ONLY, FetchMode.SOURCE_ONLY}:
+        raise ValueError(
+            "input_mode must be FetchMode.DB_ONLY or FetchMode.SOURCE_ONLY"
+        )
+    return mode
+
+
 class CalculatedOptionGreeksDataSource:
-    """Build a complete option-symbol cross-section from SOURCE_ONLY inputs."""
+    """Build a complete option-symbol cross-section from selectable inputs."""
 
     def __init__(
         self,
@@ -37,14 +55,10 @@ class CalculatedOptionGreeksDataSource:
         *,
         option_instrument_service=None,
         option_price_service=None,
-        future_price_service=None,
-        underlying_price_service=None,
     ):
         self.spec = spec or CalculatedOptionGreeksSpec()
         self._option_instrument_service = option_instrument_service
         self._option_price_service = option_price_service
-        self._future_price_service = future_price_service
-        self._underlying_price_service = underlying_price_service
 
     @property
     def option_instrument_service(self):
@@ -58,22 +72,8 @@ class CalculatedOptionGreeksDataSource:
             self._option_price_service = OptionPriceService()
         return self._option_price_service
 
-    @property
-    def future_price_service(self):
-        if self._future_price_service is None:
-            self._future_price_service = FuturePriceService()
-        return self._future_price_service
-
-    @property
-    def underlying_price_service(self):
-        if self._underlying_price_service is None:
-            # IndexPriceService and ETFPriceService both delegate SOURCE_ONLY
-            # to rqdatac.get_price; this service is used as the generic
-            # non-futures underlying price adapter.
-            self._underlying_price_service = IndexPriceService()
-        return self._underlying_price_service
-
     def fetch(self, **filters) -> pd.DataFrame:
+        input_mode = _normalize_input_mode(filters.pop("input_mode", None))
         filters = self.spec.fill_default_filters(
             self.spec.normalize_query_filters(
                 {key: value for key, value in filters.items() if value is not None}
@@ -81,11 +81,11 @@ class CalculatedOptionGreeksDataSource:
         )
         self.spec.validate_filters(filters, FetchMode.SOURCE_ONLY)
 
-        # Deliberately SOURCE_ONLY: a live calculation must not mix DB metadata
-        # with source prices.
+        # Instruments and prices always use the same input mode so a calculation
+        # cannot accidentally mix DB metadata with live source prices.
         instruments = _successful_data(
             self.option_instrument_service.get(
-                mode=FetchMode.SOURCE_ONLY,
+                mode=input_mode,
                 persist=False,
                 market=filters["market"],
             ),
@@ -98,12 +98,13 @@ class CalculatedOptionGreeksDataSource:
         option_ids = instruments["order_book_id"].astype(str).unique().tolist()
         option_prices = _successful_data(
             self.option_price_service.get(
-                mode=FetchMode.SOURCE_ONLY,
+                mode=input_mode,
                 persist=False,
                 order_book_ids=option_ids,
                 start_date=filters["start_date"],
                 end_date=filters["end_date"],
                 frequency=filters["frequency"],
+                time_slice=filters.get("time_slice"),
                 fields=[
                     "open", "close", "high", "low", "total_turnover",
                     "volume", "open_interest",
@@ -115,6 +116,18 @@ class CalculatedOptionGreeksDataSource:
         if option_prices.empty:
             return self.spec.normalize_df(pd.DataFrame(), filters)
 
+        # DB_ONLY repositories return the complete stored row, including fields
+        # such as strike_price that are also owned by the instrument snapshot.
+        # Keep only market columns here to avoid merge suffixes and make DB and
+        # source inputs expose the same calculation schema.
+        market_columns = [
+            "order_book_id", "date", "datetime", "trading_date",
+            "open", "close", "high", "low",
+            "total_turnover", "volume", "open_interest", "strike_price",
+        ]
+        option_prices = option_prices[
+            [column for column in market_columns if column in option_prices.columns]
+        ].copy()
         panel = option_prices.merge(
             instruments[
                 [
@@ -122,25 +135,46 @@ class CalculatedOptionGreeksDataSource:
                     "underlying_symbol", "maturity_date", "strike_price",
                     "option_type",
                 ]
-            ],
+            ].rename(columns={"strike_price": "instrument_strike_price"}),
             on="order_book_id",
             how="left",
             validate="many_to_one",
         )
-        panel["date"] = pd.to_datetime(panel["date"])
+        if "strike_price" not in panel:
+            panel["strike_price"] = panel["instrument_strike_price"]
+        else:
+            panel["strike_price"] = panel["strike_price"].fillna(
+                panel["instrument_strike_price"]
+            )
+        panel = panel.drop(columns="instrument_strike_price")
+        minute = filters["frequency"] == "1m"
+        observation_col = "datetime" if minute else "date"
+        panel[observation_col] = pd.to_datetime(panel[observation_col])
+        if minute:
+            if "trading_date" not in panel:
+                panel["trading_date"] = panel["datetime"].dt.date
+            panel["trading_date"] = pd.to_datetime(panel["trading_date"])
+            maturity_base = panel["trading_date"]
+        else:
+            maturity_base = panel["date"]
         panel["maturity_date"] = pd.to_datetime(panel["maturity_date"])
-        panel["t_days"] = (panel["maturity_date"] - panel["date"]).dt.days
+        panel["t_days"] = (panel["maturity_date"] - maturity_base).dt.days
         panel["risk_free_rate"] = float(filters["risk_free_rate"])
         panel["option_price"] = pd.to_numeric(panel[filters["price_type"]], errors="coerce")
         panel["opt_symbol"] = panel["underlying_symbol"].astype(str)
 
         pieces = []
         for opt_symbol, symbol_panel in panel.groupby("opt_symbol", sort=False):
-            pieces.append(self._attach_forward(symbol_panel, filters))
+            pieces.append(
+                self._attach_parity_forward(
+                    symbol_panel,
+                    observation_col=observation_col,
+                )
+            )
         calculation_input = pd.concat(pieces, ignore_index=True) if pieces else panel
         greek_input = calculation_input[
             [
-                "order_book_id", "date", "option_price", "forward_price",
+                "order_book_id", observation_col, "option_price", "forward_price",
                 "strike_price", "t_days", "risk_free_rate", "option_type",
             ]
         ].rename(
@@ -152,17 +186,26 @@ class CalculatedOptionGreeksDataSource:
         )
         greek_df = calculate_option_greeks_for_dates(
             greek_input,
+            date_col=observation_col,
             n_jobs=1,
             show_progress=False,
         )
+        if minute:
+            greek_df = greek_df.rename(columns={"date": "datetime"})
         calculated = calculation_input.merge(
             greek_df,
-            on=["order_book_id", "date"],
+            on=["order_book_id", observation_col],
             how="left",
             validate="one_to_one",
         )
 
-        calculated["date"] = pd.to_datetime(calculated["date"]).dt.date
+        if minute:
+            calculated["datetime"] = pd.to_datetime(calculated["datetime"])
+            calculated["trading_date"] = pd.to_datetime(
+                calculated["trading_date"]
+            ).dt.date
+        else:
+            calculated["date"] = pd.to_datetime(calculated["date"]).dt.date
         calculated["maturity_date"] = pd.to_datetime(
             calculated["maturity_date"], errors="coerce"
         ).dt.date
@@ -201,101 +244,31 @@ class CalculatedOptionGreeksDataSource:
         maturity = pd.to_datetime(result["maturity_date"], errors="coerce")
         return result[(listed <= end) & (maturity >= start)].copy()
 
-    def _attach_forward(self, panel: pd.DataFrame, filters: dict) -> pd.DataFrame:
-        result = panel.copy()
-        underlying_ids = result["underlying_order_book_id"].dropna().astype(str).unique()
-        is_future = len(underlying_ids) > 0 and all("." not in value for value in underlying_ids)
-        if not is_future:
-            return self._attach_parity_forward(result, filters)
-
-        future_prices = _successful_data(
-            self.future_price_service.get(
-                mode=FetchMode.SOURCE_ONLY,
-                persist=False,
-                order_book_ids=underlying_ids.tolist(),
-                start_date=filters["start_date"],
-                end_date=filters["end_date"],
-                frequency=filters["frequency"],
-                fields=["close"],
-                market=filters["market"],
-            ),
-            "future prices",
-        )
-        forward = future_prices[
-            ["order_book_id", "date", "close"]
-        ].rename(
-            columns={
-                "order_book_id": "underlying_order_book_id",
-                "close": "forward_price",
-            }
-        )
-        forward["date"] = pd.to_datetime(forward["date"])
-        result = result.merge(
-            forward,
-            on=["underlying_order_book_id", "date"],
-            how="left",
-            validate="many_to_one",
-        )
-        result["forward_method"] = "future_close"
-        return result
-
+    @staticmethod
     def _attach_parity_forward(
-        self,
         panel: pd.DataFrame,
-        filters: dict,
+        *,
+        observation_col: str = "date",
     ) -> pd.DataFrame:
         result = panel.copy()
-        underlying_ids = (
-            result["underlying_order_book_id"].dropna().astype(str).unique().tolist()
-        )
-        underlying_prices = _successful_data(
-            self.underlying_price_service.get(
-                mode=FetchMode.SOURCE_ONLY,
-                persist=False,
-                order_book_ids=underlying_ids,
-                start_date=filters["start_date"],
-                end_date=filters["end_date"],
-                frequency=filters["frequency"],
-                fields=["close"],
-                market=filters["market"],
-            ),
-            "underlying prices",
-        )
-        underlying_prices = underlying_prices[
-            ["order_book_id", "date", "close"]
-        ].rename(
-            columns={
-                "order_book_id": "underlying_order_book_id",
-                "close": "underlying_price",
-            }
-        )
-        underlying_prices["date"] = pd.to_datetime(underlying_prices["date"])
-        result = result.merge(
-            underlying_prices,
-            on=["underlying_order_book_id", "date"],
-            how="left",
-            validate="many_to_one",
-        )
-
         forward_input = result[
             [
-                "date", "option_price", "t_days", "strike_price", "option_type",
-                "risk_free_rate", "underlying_price", "volume",
+                observation_col, "option_price", "t_days", "strike_price", "option_type",
+                "risk_free_rate", "volume",
             ]
         ].copy()
         forward_input.columns = [
-            "trade_date", "price", "T_days", "K", "flag", "r",
-            "underlying_price", "volume",
+            "observation_time", "price", "T_days", "K", "flag", "r", "volume",
         ]
         forward_result = build_forward_curves_by_date(
             forward_input,
-            date_col="trade_date",
+            date_col="observation_time",
             mode="implied_forward",
             weight_col="volume",
             robust_method="weighted_mean",
             min_pairs=1,
             max_rel_dispersion=None,
-            fallback_to_spot=True,
+            fallback_to_spot=False,
             fill_missing=True,
             n_jobs=1,
             show_progress=False,
@@ -304,14 +277,19 @@ class CalculatedOptionGreeksDataSource:
             ["trade_date", "T_days", "F_final"]
         ].rename(
             columns={
-                "trade_date": "date",
+                "trade_date": observation_col,
                 "T_days": "t_days",
                 "F_final": "forward_price",
             }
         )
-        forward["date"] = pd.to_datetime(forward["date"])
-        result = result.merge(forward, on=["date", "t_days"], how="left")
-        result["forward_method"] = "cfutures_implied_weighted_mean"
+        forward[observation_col] = pd.to_datetime(forward[observation_col])
+        result = result.merge(
+            forward,
+            on=[observation_col, "t_days"],
+            how="left",
+            validate="many_to_one",
+        )
+        result["forward_method"] = "put_call_parity_weighted_mean"
         return result
 
 
