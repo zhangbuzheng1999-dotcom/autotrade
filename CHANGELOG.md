@@ -5,7 +5,7 @@
 
 ## [Unreleased]
 
-### Option Greek risk / attribution architecture (commit: `4b8aa44`)
+### Option Greek risk / attribution architecture (implementation commit: `ca7d9aa`)
 
 - `GreekRiskManager` 重构为 raw、contract、position、contract cash、position
   cash 五个显式层级；以 `delta_cash_1pct`、`gamma_cash_1pct`、
