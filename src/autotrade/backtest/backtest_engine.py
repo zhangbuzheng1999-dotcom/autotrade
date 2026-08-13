@@ -33,7 +33,7 @@ class BacktestEngine(RuntimeEngine):
         *,
         initial_cash: float = 1_000_000,
         risk_free: float = 0.02,
-        annual_days: int = 240,
+        annual_days: int = 252,
         engine_id: str = "backtest",
         logger=None,
         settings: BacktestSettings | None = None,

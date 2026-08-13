@@ -14,7 +14,8 @@ autotrade.option
 │   └── ivx.py                # IVX 计算
 ├── strategy.py               # OptionStrategy 与 option panel 组装
 ├── greek_risk_manager.py     # 运行时最新 GreekRiskState
-└── backtest_analysis.py      # 回测快照与区间 PnL 归因
+├── backtest_analysis.py      # 回测快照与区间 PnL 归因
+└── reporting.py              # 期权回测表、Greek 汇总与 Excel 导出扩展
 ~~~
 
 autotrade.strategy 只保留通用策略基类；期权策略应从 autotrade.option 导入。
@@ -29,7 +30,9 @@ TimeSlice
                                                        │
 OMS ──────────────────────────────────────────────────┤→ 当前单资产 / 组合暴露
                                                        │
-OptionBacktestAnalyzer ← record(估值时点) ─────────────┘→ 历史快照、区间 PnL 归因
+OptionBacktestAnalyzer ← trade / valuation event ──────┘→ 逐资产历史快照、区间 PnL 归因
+                                                        │
+OptionBacktestReporting ← Analyzer + BacktestReporting ┘→ 期权表、组合表、Excel 报告
 ~~~
 
 | 组件 | 负责 | 不负责 |
@@ -37,7 +40,8 @@ OptionBacktestAnalyzer ← record(估值时点) ──────────�
 | SecurityManager | 每个资产的最新 Security、价格、合约乘数和元数据 | Greeks、风险因子、PnL 归因历史 |
 | OMS | 当前持仓及方向 | 模型 Greeks、价格状态快照 |
 | GreekRiskManager | 每个 instrument_id 的最新风险记录；按 OMS 聚合当前暴露 | 计算 IV/Greeks；更新行情；修改 Security；保存历史 |
-| OptionBacktestAnalyzer | 固化估值快照、按两个快照归因区间 PnL | 维护实时风险；订阅成交事件；决定数据从何而来 |
+| OptionBacktestAnalyzer | 保存逐资产不等距快照、按同一资产的相邻快照归因 | 维护实时风险；对资产时钟做补齐；计算组合聚合 |
+| OptionBacktestReporting | 输出风险/归因明细及按时间点的组合聚合、Excel 导出 | 修改 Analyzer 事实记录；对缺失快照做最近值补齐 |
 | option.analytics | Forward、Black97 Greeks、IVX 等纯计算 | 访问 OMS、维护实盘状态、写回 Security |
 | OptionStrategy | 把 Slice.option_analytics 与 OptionContract 拼成策略面板 | 代替 GreekRiskManager 维护组合风险 |
 
@@ -234,7 +238,8 @@ portfolio_exposure 对全部有仓位资产逐项相加；未提供的字段记�
 ## 4. OptionBacktestAnalyzer：快照和归因
 
 OptionBacktestAnalyzer 是回测分析组件，依赖同一个 GreekRiskManager，但不
-参与实时状态维护：
+参与实时状态维护。它保存的是**每个资产自己的不等距时间序列**，而不是预先
+对齐后的组合时间序列：
 
 ~~~python
 from autotrade.option import OptionBacktestAnalyzer
@@ -242,20 +247,34 @@ from autotrade.option import OptionBacktestAnalyzer
 analyzer = OptionBacktestAnalyzer(risk_manager)
 
 # 在风险数据已 on_slice 后，每个需要估值/输出归因的时点调用。
-analyzer.record(when, commission=commission_since_last_record)
+analyzer.record(when, instrument_ids=["MO2409C5000"])
 ~~~
 
 record() 的职责：
 
-1. 对当时 OMS 中每个持仓读取 manager.get(instrument_id)；
-2. 深拷贝 GreekRiskState，冻结当时 Security 的价格、multiplier 与风险记录；
-3. 冻结带符号持仓数量；
-4. 保存 GreekRiskSnapshot；若已有上一个快照，立即生成区间 PnlAttribution，
-   追加到 analyzer.attributions。
+1. 对指定资产读取 OMS 的权威带符号仓位（平仓后可为 0）和 manager 状态；
+2. 深拷贝 GreekRiskState，冻结价格、multiplier 与风险记录；
+3. 将快照追加到 `instrument_snapshots[instrument_id]`；
+4. 若该资产已有上一快照，使用该资产的期初仓位、期初 Greeks 生成
+   `InstrumentPnlAttribution`，追加到
+   `instrument_attributions_by_instrument[instrument_id]`。
 
-分析器不自动监听成交。谁、在什么估值点调用 record() 是上层回测流程的职责。
-若需要准确的开仓/平仓时间标签，应由 OMS trade history 或独立 trade recorder
-保存，再在报告输出层关联到 GreekRiskSnapshot/PnlAttribution。
+默认不传 `instrument_ids` 时，`record()` 仍记录当前 OMS 的全部持仓，用于兼容
+旧调用；事件驱动接线应明确传入发生变化或需要估值的资产。Analyzer 不做最近
+快照补齐，也不做组合级归因；时间对齐和组合口径属于 Reporter。
+
+可订阅成交事件：
+
+~~~python
+# OmsBase 必须先于 analyzer 注册到同一个 event_engine，保证成交后 OMS
+# 已更新，Analyzer 才读取 post-fill 的权威仓位。
+analyzer.subscribe_trade_events(event_engine)
+~~~
+
+该订阅按 `tradeid` 去重，并忽略未被 OMS 接纳的无效成交。完全平仓时 OMS 会
+删除该持仓，但 Analyzer 仍以成交的 `instrument_id` 记录 `position=0` 的终点
+快照，确保最后一段归因不丢失。回测开始已有持仓时，仍须显式记录一条初始快照；
+持仓期间没有成交时，还应在每日/估值/回测结束时额外 record，以覆盖浮动 PnL。
 
 ### 4.1 归因口径
 
@@ -273,23 +292,26 @@ dt      = (t1 - t0) / 365 年
 ~~~
 
 driver_price 优先为记录中的 forward_price，缺失时为资产自身 Security.price。
-实际 PnL 与各分量为：
+对单个资产，实际 PnL 与各分量为：
 
 ~~~
-actual PnL = Σ scale × (security_price(t1) - security_price(t0)) - commission
+actual PnL = scale × (security_price(t1) - security_price(t0))
 
-delta = Σ scale × delta(t0) × dF
-gamma = Σ 0.5 × scale × gamma(t0) × dF²
-vega  = Σ scale × vega(t0) × dIV
-theta = Σ scale × theta(t0) × dt
-rho   = Σ scale × rho(t0) × dr
-vanna = Σ scale × vanna(t0) × dF × dIV
-vomma = Σ 0.5 × scale × vomma(t0) × dIV²
-charm = Σ scale × charm(t0) × dF × dt
+delta = scale × delta(t0) × dF
+gamma = 0.5 × scale × gamma(t0) × dF²
+vega  = scale × vega(t0) × dIV
+theta = scale × theta(t0) × dt
+rho   = scale × rho(t0) × dr
+vanna = scale × vanna(t0) × dF × dIV
+vomma = 0.5 × scale × vomma(t0) × dIV²
+charm = scale × charm(t0) × dF × dt
 
-approximate PnL = Σ Greek components - commission
+approximate PnL = Σ Greek components
 residual PnL    = actual PnL - approximate PnL
 ~~~
+
+成交手续费当前由通用 AccountLedger 记账；若要使期权归因同 equity 严格对账，
+应在报告接线中将每笔成交手续费分配到相应的资产/区间，再计算扣费后的 PnL。
 
 希腊字母单位必须与上述公式一致。当前 Black97 计算器输出的 vega、theta、rho
 已转换为分别对“小数 IV”、“年化时间”和“小数利率”的导数。
@@ -311,7 +333,49 @@ residual PnL    = actual PnL - approximate PnL
 这样同时保证：普通线性资产不提供风险数据时仍可做基本 delta PnL；期权不会
 因缺少模型 delta 而被伪装成线性资产。
 
-## 5. 典型接线方式
+## 5. OptionBacktestReporting：期权回测表与 Excel 导出
+
+`OptionBacktestReporting` 继承通用 `BacktestReporting`，通过 Analyzer 的逐资产
+事实记录生成表，不改变基础回测账本：
+
+~~~python
+from autotrade.option import OptionBacktestReporting
+
+reporting = OptionBacktestReporting(
+    recorder=gateway.recorder,
+    analyzer=performance_analyzer,
+    oms=oms,
+    option_analyzer=option_analyzer,
+)
+reporting.export_xlsx("output/option_backtest_report.xlsx")
+~~~
+
+它提供以下 DataFrame：
+
+| 方法 | 索引 | 内容 |
+| --- | --- | --- |
+| `get_position_greeks_df()` | `(asof, instrument_id)` | 逐资产持仓、合约特征、仓位调整 Greeks、`delta_notional`、`delta_pnl_1pct` |
+| `get_instrument_greek_pnl_df()` | `(end, instrument_id)` | 各资产相邻快照区间的实际 PnL、各 Greek PnL、近似 PnL、残差、有效性 |
+| `get_portfolio_greeks_df()` | `date` | 只对同一事件时间的资产风险快照加总；不做最近值补齐 |
+| `get_portfolio_greek_pnl_df()` | `date` | 按逐资产归因区间的 `end` 时间加总 |
+| `get_portfolio_greek_pnl_analysis_df()` | `greek` | 风险暴露与 Greek PnL 的统计特征 |
+
+风险统计表将每段 Greek PnL 配对到其**期初**风险暴露，输出平均/最大绝对暴露、
+累计/平均 PnL、PnL 波动、正收益比例、单位平均绝对暴露 PnL；Delta 另输出平均
+`delta_notional` 和 `delta_pnl_1pct`。归因无效的组合时点不进入这项统计。
+
+期权 Excel 报告在基础四张表 `performance`、`account_daily`、`trade_log`、
+`position_daily` 上额外输出：
+
+~~~text
+position_greeks
+instrument_greek_pnl
+portfolio_greeks
+portfolio_greek_pnl
+greek_pnl_analysis
+~~~
+
+## 6. 典型接线方式
 
 下面是策略/应用层的推荐顺序；无需修改 TimeSliceDriver：
 
@@ -333,7 +397,9 @@ class MyOptionStrategy(OptionStrategy):
         # 用 exposure 做风控、下单限制或监控。
 
         if should_value(slice_.time):
-            self.analyzer.record(slice_.time, commission=0.0)
+            # 日终/估值快照应明确指定要估值的资产；该策略在这里对当前
+            # OMS 全部持仓估值，成交事件则由 subscribe_trade_events 记录。
+            self.analyzer.record(slice_.time)
 
     def on_option_panel(self, panel, slice_):
         # 仅策略自己的期权横截面逻辑。
@@ -345,7 +411,7 @@ risk_manager.on_slice(slice_) 再调用面板组装逻辑，或覆写 on_data �
 OptionStrategy 与 GreekRiskManager 是协作关系而非隐式依赖，目的是让风险层
 适用于所有期权策略（双卖、套利、方向性等），也覆盖组合中的线性对冲资产。
 
-## 6. 当前边界与后续扩展点
+## 7. 当前边界与后续扩展点
 
 - 风险记录只按 instrument_id 缓存最新版本；不保存时间序列。历史只由
   OptionBacktestAnalyzer.record() 形成。
@@ -357,10 +423,9 @@ OptionStrategy 与 GreekRiskManager 是协作关系而非隐式依赖，目的�
 - 当前 GreekExposure 是 raw Greek exposure，不是 VaR、情景损失或保证金。
   将来可在 manager 之上添加独立 calculator/report，而无需修改 Security 或
   输入数据协议。
-- 当前归因使用两个估值点之间的期初持仓。若区间中途交易，应按成交时点切分/
-  记录估值区间，或由更高层 trade-aware report 将成交现金流和持仓段补入；
-  这不是 GreekRiskManager 的职责。
-- 当前 record() 只为“记录时仍在 OMS 中的持仓”保存 current state。因此资产在
-  两个 record 时点之间被完全平仓并从 OMS 移除时，后一快照没有该资产，前一区间
-  会报告 state_or_multiplier 缺失，不能单靠当前分析器解释其已实现 PnL。实盘级
-  报告应在成交前后加估值点，或由 trade-aware recorder 补充平仓状态和现金流。
+- 当前归因使用同一资产相邻快照之间的期初持仓。成交事件会切分持仓段；但若要
+  覆盖无成交期间的浮动 PnL，仍需要独立的日终/估值/回测结束快照。
+- 报告的组合 Greek 只按完全相同的事件时间聚合。若需要“最近有效风险暴露延续”
+  的组合曲线，应在 Reporter 增加明确的 as-of 对齐策略，而不应写进 Analyzer。
+- 外部 pandas 数据必须在 Reader 中将 `NaN` 转为 `None`；期权 Greeks 数据文件中
+  常见的 `iv` 会由标准 Reader 映射为 `surface_iv`。

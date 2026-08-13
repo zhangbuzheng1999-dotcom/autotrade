@@ -549,8 +549,38 @@ BacktestGateway：
 `BacktestRecorder` 只复制权威状态，不重新计算账户。
 
 `PerformanceAnalyzer` 只在回测结束后对记录的权益序列计算收益、回撤和 Sharpe。
+默认一年为 **252 个交易期**：CAGR 按实际记录到的相邻日期收益期数年化，
+Sharpe 使用 `sqrt(252)`，无风险利率也转换为 252 期复利收益。收益、年化、
+回撤在计算阶段保持数值；当前 `calculate()` 返回的百分比指标为便于展示的
+格式化字符串，Sharpe 保持浮点数。
 
 `BacktestReporting` 是二者的门面，负责导出 DataFrame 和统计结果。
+
+基础报告接口：
+
+~~~python
+result = engine.reporting.calculate()
+account = engine.reporting.get_account_daily_df()
+trades = engine.reporting.get_trade_log_df()
+positions = engine.reporting.get_position_daily_df()
+
+engine.reporting.export_xlsx("output/backtest_report.xlsx")
+~~~
+
+`export_xlsx(path)` 由调用方明确指定文件位置；父目录不存在时会创建。基础
+工作簿固定包含四张表：
+
+| Sheet | 内容 | 索引/主要字段 |
+| --- | --- | --- |
+| `performance` | 总收益、年化收益、Sharpe、最大回撤 | 指标名、值 |
+| `account_daily` | 账户估值快照 | `date`；cash、margin、realized/unrealized PnL、equity、available |
+| `trade_log` | OMS 成交记录 | datetime、instrument_id、orderid、direction、price、traded 等 |
+| `position_daily` | 估值时的持仓快照 | `(date, instrument_id)`；PositionData 字段 |
+
+尽管历史字段仍名为 `account_daily` / `position_daily`，实际记录频率由
+`valuation_updates` 决定，可以是日频、分钟或事件频。相同时间戳的重复快照
+会在 Recorder 的字典中以后一次为准；需要事件序列审计时应另接 append-only
+recorder。
 
 日志不属于 `BacktestEngine` 或 Gateway。`LogEngine` 在实盘和回测中都订阅 `EVENT_LOG`，并从共享 `RuntimeContext.current_time` 获取当前运行时刻。
 

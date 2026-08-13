@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+### 回测报告与期权归因报告（基线：0.10.0 / 9ad6c06）
+
+- `PerformanceAnalyzer` 与 `BacktestEngine` 的默认交易期统一为 252；CAGR、
+  Sharpe 与无风险收益日化使用同一交易期口径。
+- `BacktestReporting` 新增 `get_position_daily_df()` 和
+  `export_xlsx(path)`：基础回测报告可导出 `performance`、`account_daily`、
+  `trade_log`、`position_daily` 四张 Excel 工作表。
+- 新增 `OptionBacktestReporting`，在基础报告上追加
+  `position_greeks`、`instrument_greek_pnl`、`portfolio_greeks`、
+  `portfolio_greek_pnl` 与 `greek_pnl_analysis` 工作表。
+- `OptionBacktestAnalyzer` 改为按资产保存不等距风险快照与相邻区间归因，新增
+  `InstrumentGreekRiskSnapshot` / `InstrumentPnlAttribution`；支持显式资产
+  快照和成交事件订阅。平仓后即使 OMS 已删除持仓，仍会记录零仓位终点快照。
+- 期权报告新增逐资产与组合 Greek/PnL DataFrame、Delta 名义风险和 1% 冲击
+  PnL，以及 Greek 暴露与收益的统计分析。
+- 已使用桌面 MO 真实期权价格、合约信息和 Black97 Greeks 抽样验证归因公式。
+
 ### Option 风险状态与模块收敛
 
 - 新增 `autotrade.option` 领域包，统一容纳期权 analytics、策略面板、

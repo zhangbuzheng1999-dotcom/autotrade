@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
+from enum import Enum
 import math
+from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 import pandas as pd
@@ -87,7 +90,32 @@ class BacktestRecorder:
         ])
 
     def get_account_daily_df(self) -> pd.DataFrame:
-        return pd.DataFrame.from_dict(self.account_daily, orient="index")
+        frame = pd.DataFrame.from_dict(self.account_daily, orient="index").sort_index()
+        frame.index.name = "date"
+        return frame
+
+    def get_position_daily_df(self) -> pd.DataFrame:
+        """Return the append-only position snapshots as ``(date, instrument_id)`` rows."""
+        records = []
+        for when, positions in self.position_daily.items():
+            for position in positions:
+                records.append({
+                    "date": when,
+                    **self._record_fields(position),
+                })
+        if not records:
+            return pd.DataFrame(index=pd.MultiIndex.from_arrays([[], []], names=("date", "instrument_id")))
+        return pd.DataFrame.from_records(records).set_index(
+            ["date", "instrument_id"], drop=True,
+        ).sort_index()
+
+    @staticmethod
+    def _record_fields(record) -> dict:
+        if is_dataclass(record):
+            return {field.name: getattr(record, field.name) for field in fields(record)}
+        if isinstance(record, dict):
+            return dict(record)
+        return dict(vars(record))
 
 
 class PerformanceAnalyzer:
@@ -98,11 +126,13 @@ class PerformanceAnalyzer:
         *,
         initial_cash: float,
         risk_free: float = 0.02,
-        annual_days: int = 240,
+        annual_days: int = 252,
     ) -> None:
         self.initial_cash = float(initial_cash)
         self.risk_free = float(risk_free)
         self.annual_days = int(annual_days)
+        if self.annual_days <= 0:
+            raise ValueError("annual_days must be positive")
 
     def calculate(self, account_history: dict, *, print_result: bool = True) -> dict:
         df = pd.DataFrame.from_dict(account_history, orient="index").sort_index()
@@ -117,17 +147,22 @@ class PerformanceAnalyzer:
         )
         max_drawdown = self.max_drawdown(equity)
         timestamps = pd.to_datetime(equity.index)
-        elapsed_seconds = (timestamps[-1] - timestamps[0]).total_seconds()
+        timed_equity = pd.Series(equity.to_numpy(), index=timestamps).sort_index()
+        # Each observed calendar date represents one trading/session return.
+        # ``dropna`` intentionally excludes weekends and holidays rather than
+        # treating them as zero-return sessions.
+        daily_equity = timed_equity.resample("1D").last().dropna()
+        daily_returns = daily_equity.pct_change().dropna()
         annual_return = self.calculate_annual_return(
             self.initial_cash,
             final_equity,
-            elapsed_seconds,
+            trading_periods=len(daily_returns),
+            annual_days=self.annual_days,
         )
-        timed_equity = pd.Series(equity.to_numpy(), index=timestamps).sort_index()
-        daily_returns = timed_equity.resample("1D").last().dropna().pct_change().dropna()
         if len(daily_returns) >= 2 and daily_returns.std() > 0:
+            risk_free_period = math.expm1(math.log1p(self.risk_free) / self.annual_days)
             sharpe = (
-                (daily_returns.mean() - self.risk_free / self.annual_days)
+                (daily_returns.mean() - risk_free_period)
                 / daily_returns.std()
                 * math.sqrt(self.annual_days)
             )
@@ -152,17 +187,21 @@ class PerformanceAnalyzer:
     def calculate_annual_return(
         initial_equity: float,
         final_equity: float,
-        elapsed_seconds: float,
+        *,
+        trading_periods: int,
+        annual_days: int = 252,
     ) -> float:
+        """Annualize return from observed trading/session return periods."""
         if (
-            elapsed_seconds < 24 * 60 * 60
+            trading_periods <= 0
+            or annual_days <= 0
             or initial_equity <= 0
             or final_equity <= 0
             or not math.isfinite(initial_equity)
             or not math.isfinite(final_equity)
         ):
             return math.nan
-        years = elapsed_seconds / (365.25 * 24 * 60 * 60)
+        years = trading_periods / annual_days
         annual_log_return = (
             math.log(final_equity) - math.log(initial_equity)
         ) / years
@@ -210,6 +249,66 @@ class BacktestReporting:
 
     def get_account_daily_df(self) -> pd.DataFrame:
         return self.recorder.get_account_daily_df()
+
+    def get_position_daily_df(self) -> pd.DataFrame:
+        return self.recorder.get_position_daily_df()
+
+    def export_xlsx(self, path: str | Path) -> Path:
+        """Write the base backtest report to a four-sheet Excel workbook.
+
+        ``path`` is an explicit output location and its parent directories are
+        created when necessary.  Subclasses extend ``_export_frames`` to add
+        domain-specific sheets without duplicating workbook logic.
+        """
+        target = Path(path)
+        if target.suffix.lower() != ".xlsx":
+            raise ValueError("report export path must end with .xlsx")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with pd.ExcelWriter(target, engine="openpyxl") as writer:
+            for sheet_name, frame in self._export_frames().items():
+                safe = self._excel_safe_frame(frame)
+                safe.to_excel(writer, sheet_name=sheet_name, index=True)
+            self._format_export_workbook(writer)
+        return target
+
+    def _export_frames(self) -> dict[str, pd.DataFrame]:
+        result = self.calculate(print_result=False)
+        return {
+            "performance": pd.DataFrame.from_dict(result, orient="index", columns=["value"]),
+            "account_daily": self.get_account_daily_df(),
+            "trade_log": self.get_trade_log_df(),
+            "position_daily": self.get_position_daily_df(),
+        }
+
+    @staticmethod
+    def _excel_safe_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        """Convert non-Excel values such as enums and missing-reason tuples."""
+        def excel_value(value):
+            if isinstance(value, Enum):
+                return value.value
+            if isinstance(value, (tuple, list, set)):
+                return "; ".join(map(str, value))
+            if isinstance(value, dict):
+                return str(value)
+            return value
+
+        return frame.map(excel_value)
+
+    @staticmethod
+    def _format_export_workbook(writer) -> None:
+        from openpyxl.styles import Font, PatternFill
+
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        for worksheet in writer.book.worksheets:
+            worksheet.freeze_panes = "A2"
+            worksheet.sheet_view.showGridLines = False
+            worksheet.auto_filter.ref = worksheet.dimensions
+            for cell in worksheet[1]:
+                cell.font = Font(color="FFFFFF", bold=True)
+                cell.fill = header_fill
+            for column_cells in worksheet.columns:
+                width = min(max(len(str(cell.value or "")) for cell in column_cells) + 2, 40)
+                worksheet.column_dimensions[column_cells[0].column_letter].width = width
 
 
 __all__ = [

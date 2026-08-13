@@ -8,9 +8,12 @@ from .greek_risk_manager import (
 )
 from .backtest_analysis import (
     GreekRiskSnapshot,
+    InstrumentGreekRiskSnapshot,
+    InstrumentPnlAttribution,
     OptionBacktestAnalyzer,
     PnlAttribution,
 )
+from .reporting import OptionBacktestReporting
 from .strategy import (
     OptionContractView,
     OptionPanelAssembler,
@@ -24,7 +27,10 @@ __all__ = [
     "GreekRiskManager",
     "GreekRiskSnapshot",
     "GreekRiskState",
+    "InstrumentGreekRiskSnapshot",
+    "InstrumentPnlAttribution",
     "OptionBacktestAnalyzer",
+    "OptionBacktestReporting",
     "OptionContractView",
     "OptionPanelAssembler",
     "OptionPanelView",
