@@ -67,10 +67,13 @@ GreekRiskState(
 - state.multiplier 是当前 Security.multiplier。
 - state.delta、gamma、vega、theta、rho、vanna、vomma、charm 来自最新风险
   记录；未提供时均为 None，而不是伪造为零或一。
-- state.forward_price 来自最新风险记录；state.driver_price 优先取 forward，
-  缺失时自然退回 state.price。
-- state.unit_exposure("delta") 为单份合约的 delta × multiplier；
-  state.unit_dollar_delta_1pct 再乘 driver_price × 1%。
+- `state.factor_price` / `state.driver_price` 是归因中的风险因子价格。对于期权，
+  它严格取 manager 初始化时声明的 `forward_price` 或 `underlying_price`；两者
+  不存在时为 None，**绝不**退回到期权权利金。对于非期权，则依次取 custom
+  `factor_price`、custom `forward_price`、自身 Security.price。
+- 不再提供含义含混的 `unit_exposure()` 或 `unit_dollar_delta_1pct`。应调用
+  `state.exposure(level="contract")` 获得每张合约的敏感度，或调用
+  `state.exposure(level="contract_cash")` 获得命名明确的标准 shock 现金 PnL。
 
 None 表示“未知/未提供”，与数值 0.0 明确不同。这样 ETF、股票、期货和
 期权共用同一个状态类型：线性资产通常只有 delta，期权可以有完整 Greeks，
@@ -86,6 +89,7 @@ from autotrade.option import GreekRiskManager
 risk_manager = GreekRiskManager(
     security_manager=security_manager,
     oms=oms,
+    option_factor_price="forward",  # Black-97 默认；也可显式选择 "underlying"
 )
 ~~~
 
@@ -185,8 +189,9 @@ etf_risk = CustomData(
     value=0.0,  # 管理器不使用；价格仍取 Security.price
     custom_type=NON_OPTION_GREEK_RISK_DATA_NAME,
     payload={
-        "delta": 1.0,              # 或策略定义的 beta 映射 delta
-        "forward_price": 3.01,     # 可选；缺失时归因用该资产自身价格
+        "factor_id": "000852.XSHG",
+        "factor_price": 6500.0,
+        "delta": 1.0,              # 或 beta × ETF价格 / 因子价格
         # "gamma": ...,
         # "surface_iv": ...,       # 需要 vega/vanna/vomma 归因时提供
         # "risk_free_rate": ...,   # 需要 rho 归因时提供
@@ -214,26 +219,33 @@ dict[data_name, dict[instrument_id, list[CustomData]]]
 
 ~~~python
 state = risk_manager.get("510050.XSHG")
-print(state.price, state.delta, state.forward_price)
-print(state.unit_delta_exposure)
+print(state.factor_id, state.factor_price, state.delta)
 
-asset = risk_manager.asset_exposure("510050.XSHG")
-print(asset.quantity, asset.delta, asset.gamma)
+cash = risk_manager.exposure("510050.XSHG", level="position_cash")
+print(cash.delta_cash_1pct, cash.gamma_cash_1pct)
 
-portfolio = risk_manager.portfolio_exposure()
-print(portfolio.delta, portfolio.vega, portfolio.missing)
+by_factor = risk_manager.portfolio_exposure(level="position_cash")
+print(by_factor["000852.XSHG"].delta_cash_1pct)
 ~~~
 
-asset_exposure 默认从 OMS 取得带符号仓位：Direction.SHORT 的正数量转为负数量。
-每个 Greek 暴露为：
+`exposure()` 以 `level` 显式选择层级：`raw`、`contract`、`position`、
+`contract_cash`、`position_cash`。前三级分别是模型导数、乘数调整敏感度和
+仓位敏感度；后两级是标准 shock 下的现金 PnL。标准 shock 由 `GreekShock`
+统一定义：标的 1%、IV 1 vol point、利率 1bp、时间 1 天。
 
-~~~
-position_quantity × security.multiplier × greek
-~~~
+`portfolio_exposure()` 返回 `{factor_id: GreekExposure}`，因此不同风险因子不
+会被错误相加。没有 custom 风险记录的非期权默认是自身因子、delta=1、其他 Greek=0。
 
-portfolio_exposure 对全部有仓位资产逐项相加；未提供的字段记录到 missing，
-如 "510050.XSHG:vega"。它不会将缺失 Greek 默认为零或将线性资产 delta
-默认为一，这是运行时风险展示的保守语义。
+风险因子价格按运行时 `Security` 类型确定，而不按代码字符串猜测：
+
+| 类型 | factor_id | factor_price | 默认 Delta |
+| --- | --- | --- | --- |
+| `OptionContract` | analytics 的 `underlying_instrument_id`（否则合约 underlying） | manager 明确选择的 `forward_price` 或 `underlying_price` | 必须来自 analytics |
+| `FutureContract` | custom `factor_id`，否则自身 | custom `factor_price`，否则自身价格 | 1 |
+| `EquitySecurity`（ETF/股票） | custom `factor_id`，否则自身 | custom `factor_price`，否则自身价格 | 1 |
+
+期权不会读取 custom `factor_price`，也绝不会用期权权利金作为 factor price；所选
+`forward_price` / `underlying_price` 缺失时，该风险状态的含标的因子归因会标记为无效。
 
 ## 4. OptionBacktestAnalyzer：快照和归因
 
@@ -291,7 +303,9 @@ dr      = risk_free_rate(t1) - risk_free_rate(t0)
 dt      = (t1 - t0) / 365 年
 ~~~
 
-driver_price 优先为记录中的 forward_price，缺失时为资产自身 Security.price。
+对于期权，driver_price 由 manager 的 `option_factor_price` 明确选择为
+forward 或 underlying；缺失即为 None 并使该段归因无效，绝不使用权利金。
+对于非期权，缺失显式因子价格时才使用自身 Security.price。
 对单个资产，实际 PnL 与各分量为：
 
 ~~~
@@ -354,23 +368,23 @@ reporting.export_xlsx("output/option_backtest_report.xlsx")
 
 | 方法 | 索引 | 内容 |
 | --- | --- | --- |
-| `get_position_greeks_df()` | `(asof, instrument_id)` | 逐资产持仓、合约特征、仓位调整 Greeks、`delta_notional`、`delta_pnl_1pct` |
-| `get_instrument_greek_pnl_df()` | `(end, instrument_id)` | 各资产相邻快照区间的实际 PnL、各 Greek PnL、近似 PnL、残差、有效性 |
-| `get_portfolio_greeks_df()` | `date` | 只对同一事件时间的资产风险快照加总；不做最近值补齐 |
-| `get_portfolio_greek_pnl_df()` | `date` | 按逐资产归因区间的 `end` 时间加总 |
-| `get_portfolio_greek_pnl_analysis_df()` | `greek` | 风险暴露与 Greek PnL 的统计特征 |
+| `get_position_cash_greeks_df()` | `(asof, instrument_id)` | 逐资产持仓、合约特征、标准化现金 Greeks |
+| `get_instrument_greek_pnl_df()` | `(end, factor_id, instrument_id)` | 各资产相邻快照区间的实际 PnL、各 Greek PnL、近似 PnL、残差、有效性 |
+| `get_portfolio_cash_greeks_df()` | `(date, factor_id)` | 同一风险因子、同一事件时间的标准化现金 Greek 加总；不做最近值补齐 |
+| `get_portfolio_greek_pnl_df()` | `(date, factor_id)` | 按逐资产归因区间的 `end` 时间、风险因子加总 |
+| `get_portfolio_greek_pnl_analysis_df()` | `greek` | 标准化现金风险与 Greek PnL 的统计特征 |
 
-风险统计表将每段 Greek PnL 配对到其**期初**风险暴露，输出平均/最大绝对暴露、
-累计/平均 PnL、PnL 波动、正收益比例、单位平均绝对暴露 PnL；Delta 另输出平均
-`delta_notional` 和 `delta_pnl_1pct`。归因无效的组合时点不进入这项统计。
+标准化现金 Greek 使用：标的 ±1%、IV ±1 vol point、利率 ±1bp、时间 1 天；
+风险统计表将每段 Greek PnL 配对到其**期初**标准化现金风险，输出平均/最大绝对
+风险、累计/平均 PnL、PnL 波动与正收益比例。归因无效的组合时点不进入统计。
 
 期权 Excel 报告在基础四张表 `performance`、`account_daily`、`trade_log`、
 `position_daily` 上额外输出：
 
 ~~~text
-position_greeks
+position_cash_greeks
 instrument_greek_pnl
-portfolio_greeks
+portfolio_cash_greeks
 portfolio_greek_pnl
 greek_pnl_analysis
 ~~~
@@ -429,3 +443,179 @@ OptionStrategy 与 GreekRiskManager 是协作关系而非隐式依赖，目的�
   的组合曲线，应在 Reporter 增加明确的 as-of 对齐策略，而不应写进 Analyzer。
 - 外部 pandas 数据必须在 Reader 中将 `NaN` 转为 `None`；期权 Greeks 数据文件中
   常见的 `iv` 会由标准 Reader 映射为 `surface_iv`。
+
+## 8. 本次重构的设计决策与使用准则
+
+本节记录当前接口的最终设计意图。核心原则是：**风险状态、历史事实、组合对齐
+和展示报告是四件不同的事，不能互相代替。**
+
+### 8.1 一份状态，一个显式层级
+
+`GreekRiskState` 只描述“某个 instrument 此刻的模型输入和 raw Greeks”。
+`GreekExposure` 才描述“以什么层级、对多少仓位、在什么标准 shock 下观察它”。
+这避免了旧式 `delta_notional`、`delta_pnl_1pct` 等名称同时混合了单位、价格、
+仓位和 shock 的问题。
+
+统一链路为：
+
+~~~text
+Raw Greek
+  -> Contract Greek       = Raw × multiplier
+  -> Position Greek       = Contract × signed quantity
+  -> Contract Cash Greek  = Contract Greek × named standard shock × Taylor coefficient
+  -> Position Cash Greek  = Contract Cash Greek × signed quantity
+~~~
+
+`raw`、`contract`、`position` 返回的列名仍是 `delta`、`gamma` 等数学导数；
+`contract_cash`、`position_cash` 返回下列固定命名的现金 PnL 风险：
+
+| 字段 | 含义 |
+| --- | --- |
+| `delta_cash_1pct` | 标的变动 1% 的一阶现金 PnL |
+| `gamma_cash_1pct` | 标的变动 1% 的二阶现金 PnL，含 1/2 |
+| `vega_cash_1vol` | IV 变动 1 vol point 的现金 PnL |
+| `theta_cash_1d` | 经过 1 天的现金 PnL |
+| `rho_cash_1bp` | 利率变动 1 bp 的现金 PnL |
+| `vanna_cash_1pct_1vol` | 1% 标的 × 1 vol point 的交叉现金 PnL |
+| `vomma_cash_1vol` | 1 vol point 的二阶 vol 现金 PnL，含 1/2 |
+| `charm_cash_1pct_1d` | 1% 标的 × 1 天的交叉现金 PnL |
+
+默认 shock 为 spot return=0.01、vol change=0.01、rate change=0.0001、
+time=1/365 年；需要不同情景时传入 `GreekShock`，而不是修改 raw Greek。
+
+~~~python
+from autotrade.option import GreekShock
+
+one_contract = risk_manager.exposure(option_id, quantity=1, level="contract_cash")
+held = risk_manager.exposure(option_id, level="position_cash")
+stress = risk_manager.exposure(
+    option_id, level="position_cash",
+    shock=GreekShock(spot_return=0.03, vol_change=0.02),
+)
+~~~
+
+对冲数量应直接比较同一风险因子下的现金 Delta，而非自行拼接
+`delta × multiplier × price`：
+
+~~~python
+target = risk_manager.exposure(option_id, level="position_cash")
+hedge_unit = risk_manager.exposure(hedge_id, quantity=1, level="contract_cash")
+hedge_contracts = -target.delta_cash_1pct / hedge_unit.delta_cash_1pct
+~~~
+
+这要求两边 `factor_id` 与风险因子定义一致。若 ETF 的价格变化只近似跟踪指数，
+应先在上游对 ETF/指数收益率回归得到 beta 或 inverse-beta 约定，再将该约定、
+`factor_id` 与 `factor_price` 一起作为非期权风险记录输入；manager 不应猜测 beta。
+
+### 8.2 Black-97 因子与 Greek 单位
+
+Black-97 的 Delta/Gamma 是对 forward 的导数。因此期权回测应在创建 manager 时
+明确 `option_factor_price="forward"`；若模型确实提供并使用现货 Greeks，才选择
+`"underlying"`。不要把期权价格当作因子价格，否则 Gamma 项会按权利金的价格尺度
+错误计算。
+
+当前 cfutures Black-97 数据约定为：
+
+- `delta`、`gamma`：对 forward 价格单位的导数；
+- `vega`：对 IV 小数（例如 0.01）的导数；
+- `theta`：对年化时间的导数；
+- `rho`：对利率小数的导数；
+- `vanna`、`vomma`、`charm`：也使用归因公式中的小数 IV / 年化时间口径。
+
+因此 Analyzer 中的 `dIV` 和 `dt_year` 不再额外乘错 100 或 365。现金风险表中的
+`*_cash_1vol`、`*_cash_1d` 只是为了风险展示再施加标准 shock；它们不是历史 PnL
+归因的输入列。
+
+### 8.3 历史归因、组合聚合与无效区间
+
+Analyzer 对每个资产只比较它自己的相邻快照：
+
+~~~text
+(20:13, A) -> A 的一段归因
+(20:15, A) -> A 的下一段归因
+(20:15, B) -> B 的独立归因
+~~~
+
+Reporter 才按精确 end timestamp 和 `factor_id` 把上述独立区间聚合。它不会做
+“最近快照”向前填充；如需日频组合曲线，应由调用方在报告层明确选择 as-of 对齐
+规则。这样事件驱动的非等距资产时钟不会被 Analyzer 隐式扭曲。
+
+一段归因若缺少期权起点 Delta、起终点 factor price、价格、乘数，或因子 ID
+改变，则：
+
+- `actual_pnl` 仍尽可能保留（只要价格、仓位和乘数足够）；
+- `valid=False` 且 `missing` 写入确切原因；
+- `approximate_pnl`、`residual_pnl` 为 None；
+- Reporter 不把它的 Greek PnL/残差混入有效组合分解。
+
+所以必须分开报告“全样本 actual PnL”和“可归因样本 actual/approximate/residual
+PnL”。有效区间的推荐精度指标为：
+
+~~~text
+weighted absolute attribution error
+= sum(abs(residual_pnl)) / sum(abs(actual_pnl))
+~~~
+
+不要用 `sum(residual) / sum(actual)` 作为唯一精度指标：当正负 PnL 相互抵消时，
+该比例会被放大。逐合约日的相对误差也应排除 `actual_pnl=0`，并同时给出中位数、
+分位数和按绝对实际 PnL 加权的结果。
+
+### 8.4 回测接线的权威顺序
+
+推荐按下列顺序组装；关键是 risk manager 先于策略读取面板更新，Analyzer 在 OMS
+成交后读取持仓，并在每个估值点保留持仓快照：
+
+~~~python
+risk_manager = GreekRiskManager(engine.security_manager, engine.oms)
+events.register(EVENT_SLICE, lambda event: risk_manager.on_slice(event.data))
+
+analyzer = OptionBacktestAnalyzer(risk_manager)
+analyzer.subscribe_trade_events(events)  # 必须在 OMS 已注册之后
+gateway.option_analyzer = analyzer        # gateway.process_valuation 内 record(...)
+
+engine.reporting = OptionBacktestReporting(
+    recorder=gateway.recorder,
+    analyzer=PerformanceAnalyzer(initial_cash=initial_cash, annual_days=252),
+    oms=engine.oms,
+    option_analyzer=analyzer,
+)
+~~~
+
+网关的估值记录应包含所有当前持仓以及 Analyzer 已见过的资产，以便平仓后的零仓位
+终点可形成最后一段归因。`subscribe_trade_events()` 提供成交后快照，估值快照提供
+持仓期间的浮动 PnL；两者都需要。
+
+### 8.5 全样本归因验证模块
+
+`tests/integration/option_attribution_validation.py` 是一个可执行的集成验证模块，
+不是交易策略。它只使用 `/Desktop/data/autotrade_rq` 中的
+`optioninstrument_{asset}.pkl`、`optionprice_{asset}.pkl` 与
+`calculatedoptionGreeks_{asset}.pkl`：
+
+1. 每日只在一个时点决策；
+2. 所有当日可交易、尚未持有且剩余到期日不少于 3 天的期权各买 1 张；
+3. 持仓剩余到期日小于 3 天即平仓并永久退休；
+4. 不因 Greek 缺失跳过合约，而是用 `valid/missing` 检验数据和归因覆盖率。
+
+~~~bash
+cd /home/buzheng/Desktop/autotrade
+PYTHONPATH=src python tests/integration/option_attribution_validation.py \
+  --asset MO --start 2023-01-03 --end 2023-02-10
+~~~
+
+不传 `--start/--end` 则覆盖数据全区间。输出目录默认是
+`tests/integration/results_all_option_attribution/{asset}`，包含：
+
+~~~text
+validation_summary.csv
+position_cash_greeks.parquet
+instrument_greek_pnl.parquet
+portfolio_cash_greeks.parquet
+portfolio_greek_pnl.parquet
+greek_pnl_analysis.csv
+~~~
+
+Parquet 保留 MultiIndex，适合全期权面板的大表；若需 Excel，使用
+`OptionBacktestReporting.export_xlsx()` 输出同名 sheet。该验证模块覆盖大量深度
+虚实值、陈旧价格、临近到期和缺失曲面记录，因此它的残差不能直接代表经流动性和
+信号筛选后的真实策略；它的用途是定位口径错误、缺失率和归因尾部样本。

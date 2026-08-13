@@ -60,6 +60,7 @@ class InstrumentPnlAttribution:
     start: datetime
     end: datetime
     instrument_id: str
+    factor_id: str | None
     actual_pnl: float
     greek_pnl: Mapping[str, float | None]
     approximate_pnl: float | None
@@ -180,7 +181,7 @@ class OptionBacktestAnalyzer:
         missing: list[str] = []
         start, end = previous.state, current.state
         if not quantity:
-            return InstrumentPnlAttribution(previous.asof, current.asof, instrument_id, 0.0, components, 0.0, 0.0, True, ())
+            return InstrumentPnlAttribution(previous.asof, current.asof, instrument_id, start.factor_id, 0.0, components, 0.0, 0.0, True, ())
         if start.security is None:
             missing.append(f"{instrument_id}:state_or_multiplier")
         else:
@@ -217,7 +218,10 @@ class OptionBacktestAnalyzer:
                     if charm is not None: components["charm"] = scale * charm * d_factor * dt_year
         valid = not missing
         approximate = sum(components.values()) if valid else None
-        return InstrumentPnlAttribution(previous.asof, current.asof, instrument_id, actual, components, approximate, None if approximate is None else actual - approximate, valid, tuple(sorted(set(missing))))
+        if start.factor_id != end.factor_id:
+            missing.append(f"{instrument_id}:factor_id_changed")
+            valid, approximate = False, None
+        return InstrumentPnlAttribution(previous.asof, current.asof, instrument_id, start.factor_id, actual, components, approximate, None if approximate is None else actual - approximate, valid, tuple(sorted(set(missing))))
 
     @staticmethod
     def aggregate_pnl_attribution(

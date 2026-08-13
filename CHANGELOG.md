@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### Option Greek risk / attribution architecture (commit: `4b8aa44`)
+
+- `GreekRiskManager` 重构为 raw、contract、position、contract cash、position
+  cash 五个显式层级；以 `delta_cash_1pct`、`gamma_cash_1pct`、
+  `vega_cash_1vol`、`theta_cash_1d` 等字段表达标准化现金风险。
+- 期权风险因子由 `option_factor_price="forward"|"underlying"` 明确选择；
+  期权 forward/underlying 缺失时不再退回权利金，归因区间会安全标记为无效。
+- `OptionBacktestAnalyzer` 的逐资产归因增加 `factor_id`，因子变化或输入缺失的
+  实际 PnL 保留，但不再混入 approximate/residual Greek PnL 汇总。
+- `OptionBacktestReporting` 输出 factor-aware 的现金 Greek、逐合约 Greek PnL、
+  组合 Greek PnL 与风险收益分析；Excel 导出禁用 MultiIndex 单元格合并，保证
+  可无损读回。
+- 新增 `tests/integration/option_attribution_validation.py` 全期权滚动持有验证，
+  并扩充 `frameworkguide.md`：记录四层单位、Black-97 因子、回测接线、有效
+  区间误差指标与使用方式。
+
 ### 回测报告与期权归因报告（基线：0.10.0 / 9ad6c06）
 
 - `PerformanceAnalyzer` 与 `BacktestEngine` 的默认交易期统一为 252；CAGR、

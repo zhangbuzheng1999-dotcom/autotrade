@@ -267,7 +267,12 @@ class BacktestReporting:
         with pd.ExcelWriter(target, engine="openpyxl") as writer:
             for sheet_name, frame in self._export_frames().items():
                 safe = self._excel_safe_frame(frame)
-                safe.to_excel(writer, sheet_name=sheet_name, index=True)
+                # Repeated MultiIndex labels are facts, not visual grouping:
+                # write every timestamp explicitly so a round-trip through
+                # Excel does not turn rows into NaT when read back.
+                safe.to_excel(
+                    writer, sheet_name=sheet_name, index=True, merge_cells=False,
+                )
             self._format_export_workbook(writer)
         return target
 
