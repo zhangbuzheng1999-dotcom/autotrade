@@ -12,25 +12,50 @@ authors = [
     { name = "zhangbuzheng" }
 ]
 dependencies = [
-    "basis==0.1.0",
-    "bcrypt==4.3.0",
-    "fastapi==0.116.2",
-    "futu_api==9.3.5308",
     "numpy>=1.24,<3.0",
-    "pandas==2.3.2",
-    "matplotlib==3.10.8",
-    "pyecharts==2.0.8",
-    "PyJWT==2.10.1",
-    "pymysql==1.1.1",
+    "pandas>=2.2,<4.0",
+    "openpyxl>=3.1",
     "py-vollib==1.0.1",
-    "pytest==8.4.1",
-    "python-dotenv==1.1.1",
-    "tqdm==4.67.3",
-    "pyzmq==26.2.0",
-    "Requests==2.32.4",
-    "SQLAlchemy==2.0.41",
-    "uvicorn==0.35.0",
-    "websockets==15.0.1"
+    "python-dotenv>=1.1",
+    "requests>=2.32",
+    "tqdm>=4.67"
+]
+
+[project.optional-dependencies]
+# RiceQuant credentials are configured externally; these packages are only
+# needed when using autotrade.data.ricequant and its local databases.
+ricequant = [
+    "clickhouse-connect>=0.8",
+    "pymysql>=1.1",
+    "rqdatac",
+]
+# A concrete Gateway is optional: backtests do not require a broker SDK.
+live = [
+    "futu-api>=9.3.5308",
+]
+server = [
+    "bcrypt>=4.3",
+    "fastapi>=0.116",
+    "PyJWT>=2.10",
+    "pyzmq>=26.2",
+    "uvicorn>=0.35",
+    "websockets>=15.0",
+]
+tradebook = [
+    "pymongo>=4.10",
+]
+plot = [
+    "matplotlib>=3.8",
+    "pyecharts>=2.0",
+]
+dev = [
+    "pytest>=8.4",
+]
+# These packages are only used by legacy modules outside the current runtime
+# and RiceQuant data path.
+legacy = [
+    "SQLAlchemy>=2.0",
+    "tushare",
 ]
 
 [project.urls]
