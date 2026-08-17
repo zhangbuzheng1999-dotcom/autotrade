@@ -27,6 +27,9 @@ repository_error.log
 example/backtest_res/
 
 # Machine-local runtime state (never commit credentials or run output)
+*.db
+*.sqlite
+*.sqlite3
 /src/autotrade/data/users.db
 /src/autotrade/data/querydata_from_futu/logs/
 /src/autotrade/data/tushare/repository_error.log
@@ -34,7 +37,5 @@ example/backtest_res/
 # Locally generated synthetic inputs for examples
 example/data/
 
-# Local and historical documentation kept outside the tracked README.
-# Keep the changelog as the single tracked document in this directory.
-/docs/*
-!/docs/CHANGELOG.md
+# Local and historical reference material kept outside the public README.
+/docs/
