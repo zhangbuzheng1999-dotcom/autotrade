@@ -791,11 +791,55 @@ def build_calculated_option_greeks_daily_table_sql(
     """
 
 
+def build_calculated_option_greeks_minute_table_sql(
+    table_name: str = "calculated_option_greeks_1m",
+) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS `{table_name}` (
+        `order_book_id` String,
+        `datetime` DateTime,
+        `trading_date` Date,
+        `opt_symbol` String,
+        `underlying_order_book_id` String,
+        `maturity_date` Date,
+        `strike_price` Float64,
+        `option_type` String,
+        `option_price` Nullable(Float64),
+        `forward_price` Nullable(Float64),
+        `risk_free_rate` Float64,
+        `t_days` Int32,
+        `iv` Nullable(Float64),
+        `delta` Nullable(Float64),
+        `gamma` Nullable(Float64),
+        `vega` Nullable(Float64),
+        `theta` Nullable(Float64),
+        `rho` Nullable(Float64),
+        `vanna` Nullable(Float64),
+        `vomma` Nullable(Float64),
+        `charm` Nullable(Float64),
+        `forward_method` String,
+        `price_type` String,
+        `frequency` String,
+        `market` String,
+        `model_id` String,
+        `model_version` String,
+        `ingest_time` DateTime64(3) DEFAULT now64(3)
+    )
+    ENGINE = ReplacingMergeTree(ingest_time)
+    PARTITION BY toYYYYMM(`datetime`)
+    ORDER BY (`datetime`, `order_book_id`, `model_id`, `model_version`)
+    """
+
+
 def create_calculated_option_greeks_tables(
     database_name: str = "rq_option_data",
 ) -> None:
     execute_clickhouse_sql(
         build_calculated_option_greeks_daily_table_sql(),
+        database=database_name,
+    )
+    execute_clickhouse_sql(
+        build_calculated_option_greeks_minute_table_sql(),
         database=database_name,
     )
 

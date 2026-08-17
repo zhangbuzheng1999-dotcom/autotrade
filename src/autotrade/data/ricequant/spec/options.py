@@ -30,7 +30,7 @@ class OptionPriceSpec(BaseRQSpec):
     API_REQUIRED_FILTERS = {"order_book_ids", "frequency"}
     DB_QUERY_FIELDS = {
         "frequency", "market", "order_book_id", "order_book_ids", "date", "datetime",
-        "trading_date",
+        "trading_date", "time_slice",
         "start_date", "end_date", "open", "close", "high", "low", "limit_up",
         "limit_down", "total_turnover", "volume", "num_trades", "prev_close",
         "settlement", "prev_settlement", "open_interest", "dominant_id", "strike_price",
@@ -82,6 +82,15 @@ class OptionPriceSpec(BaseRQSpec):
             )
         if frequency == "1w" and filters.get("expect_df") is False:
             raise ValueError("weekly price query requires expect_df=True")
+        time_slice = filters.get("time_slice")
+        if time_slice is not None:
+            if not self.is_minute_frequency(frequency):
+                raise ValueError("option_price time_slice is only supported for minute frequencies")
+            if not isinstance(time_slice, (list, tuple)) or len(time_slice) != 2:
+                raise ValueError("option_price time_slice must be a (start_time, end_time) pair")
+            start_time, end_time = (self._normalize_time_value(value) for value in time_slice)
+            if start_time > end_time:
+                raise ValueError("option_price time_slice start_time must be <= end_time")
         if mode in {FetchMode.SOURCE_ONLY, FetchMode.DB_THEN_SOURCE} and not filters.get("order_book_ids"):
             raise ValueError(f"{self.RESOURCE_NAME} requires order_book_ids for mode={mode.value}")
 
@@ -104,9 +113,13 @@ class OptionPriceSpec(BaseRQSpec):
             "order_book_ids": {"column": "order_book_id", "op": "in"},
             "start_date": {"column": time_col, "op": "gte"},
             "end_date": {"column": time_col, "op": "lte"},
+            "_datetime_scan_start": {"column": "datetime", "op": "gte"},
+            "_datetime_scan_end": {"column": "datetime", "op": "lt"},
+            "_datetime_time_intervals": {"column": "datetime", "op": "datetime_intervals"},
             "date": {"column": "date", "op": "eq"},
             "datetime": {"column": "datetime", "op": "eq"},
             "trading_date": {"column": "trading_date", "op": "eq"},
+            "time_slice": {"column": "datetime", "op": "time_between"},
             "open": {"column": "open", "op": "eq"},
             "close": {"column": "close", "op": "eq"},
             "high": {"column": "high", "op": "eq"},
@@ -133,12 +146,45 @@ class OptionPriceSpec(BaseRQSpec):
         if self.is_minute_frequency(frequency):
             if "start_date" in result:
                 result["start_date"] = pd.to_datetime(result["start_date"]).date()
+                # Chinese futures night sessions can belong to the following
+                # trading date, so retain one preceding calendar day in this
+                # coarse primary-key pruning range. trading_date remains the
+                # authoritative exact filter.
+                result["_datetime_scan_start"] = (
+                    pd.Timestamp(result["start_date"]) - pd.Timedelta(days=1)
+                )
             if "end_date" in result:
                 result["end_date"] = pd.to_datetime(result["end_date"]).date()
+                result["_datetime_scan_end"] = (
+                    pd.Timestamp(result["end_date"]) + pd.Timedelta(days=1)
+                )
             if "datetime" in result:
                 result["datetime"] = pd.to_datetime(result["datetime"])
             if "trading_date" in result:
                 result["trading_date"] = pd.to_datetime(result["trading_date"]).date()
+            if "time_slice" in result:
+                result["time_slice"] = tuple(
+                    self._normalize_time_value(value).strftime("%H:%M:%S")
+                    for value in result["time_slice"]
+                )
+                if "_datetime_scan_start" in result and "_datetime_scan_end" in result:
+                    start_clock, end_clock = result["time_slice"]
+                    calendar_days = pd.date_range(
+                        result["_datetime_scan_start"].normalize(),
+                        result["_datetime_scan_end"].normalize() - pd.Timedelta(days=1),
+                        freq="D",
+                    )
+                    result["_datetime_time_intervals"] = [
+                        (
+                            pd.Timestamp(f"{day.date()} {start_clock}"),
+                            pd.Timestamp(f"{day.date()} {end_clock}"),
+                        )
+                        for day in calendar_days
+                    ]
+                    # The disjoint intervals are a tighter primary-key filter
+                    # than the coarse continuous datetime range.
+                    result.pop("_datetime_scan_start", None)
+                    result.pop("_datetime_scan_end", None)
         else:
             if "start_date" in result:
                 result["start_date"] = pd.to_datetime(result["start_date"]).date()
@@ -147,6 +193,13 @@ class OptionPriceSpec(BaseRQSpec):
             if "date" in result:
                 result["date"] = pd.to_datetime(result["date"]).date()
         return result
+
+    @staticmethod
+    def _normalize_time_value(value):
+        try:
+            return pd.to_datetime(str(value)).time()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid option_price time value: {value!r}") from exc
 
     def split_filters(self, filters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         api_filters = {}
@@ -215,6 +268,10 @@ class OptionPriceSpec(BaseRQSpec):
         if "trading_date" in result.columns:
             result["trading_date"] = pd.to_datetime(result["trading_date"], errors="coerce").dt.date
         post_filters = dict(filters)
+        # rqdatac applies time_slice at source; DB_ONLY compiles it directly in
+        # ClickHouse. Do not send the custom DB operator to the generic pandas
+        # post-filter implementation.
+        post_filters.pop("time_slice", None)
         if "start_date" in post_filters:
             if self.is_minute_frequency(filters.get("frequency")):
                 post_filters["start_date"] = pd.to_datetime(post_filters["start_date"]).date()

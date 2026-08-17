@@ -734,6 +734,27 @@ class BaseClickHouseRepository:
     def _compile_filter_clause(self, column: str, op: str, value: Any) -> str:
         col = f"`{column}`"
 
+        if op == "time_between":
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError("time_between requires a (start_time, end_time) pair")
+            start_time, end_time = value
+            return (
+                f"formatDateTime({col}, '%H:%i:%S') >= {self._format_value(start_time)} AND "
+                f"formatDateTime({col}, '%H:%i:%S') <= {self._format_value(end_time)}"
+            )
+
+        if op == "datetime_intervals":
+            intervals = value if isinstance(value, (list, tuple)) else []
+            if not intervals:
+                return "0"
+            clauses = []
+            for start_datetime, end_datetime in intervals:
+                clauses.append(
+                    f"({col} >= {self._format_value(start_datetime)} AND "
+                    f"{col} <= {self._format_value(end_datetime)})"
+                )
+            return "(" + " OR ".join(clauses) + ")"
+
         if op == "eq":
             return f"{col} = {self._format_value(value)}"
         if op == "in":
