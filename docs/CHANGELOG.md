@@ -3,6 +3,28 @@
 本文记录 Autotrade 的架构和公开接口变化。版本号遵循语义化版本；带破坏性
 接口调整的版本会明确列出迁移方式。
 
+## [Unreleased] - 2026-08-17
+
+### `chore: remove legacy artifacts and untrack local runtime data`
+
+- 停止跟踪本机 `users.db` 与两份运行日志，并加入对应忽略规则；本地文件保留。
+- 删除已废弃的 RiceQuant 静态文档、历史测试、旧示例和重复的根目录说明文件。
+
+### `docs: rebuild README around the unified runtime`
+
+- README 改为沿数据、事件、策略、执行、OMS、回测、实盘、期权和数据基础设施
+  的运行路径组织；补充统一架构图与完整的 TimeSlice/回测说明。
+- 新增可复现的合成数据生成器及 SMA 回测示例，示例数据默认在本地生成。
+
+### `feat: extend RiceQuant calculated option storage`
+
+- RiceQuant 数据层支持期权计算指标的一分钟表、时间片查询和日频/分钟频字段对齐。
+
+### `build: align supported dependencies`
+
+- 将项目依赖统一到 `pyproject.toml`，按 RiceQuant、实盘服务、绘图等场景拆分可选
+  extras，`requirements.txt` 改为完整安装入口。
+
 ## [Unreleased]
 
 ### Option Greek risk / attribution architecture (implementation commit: `ca7d9aa`)
